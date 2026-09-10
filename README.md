@@ -21,8 +21,15 @@ cd /home/robot/yx/project/calib/calib_workstation
 ```
 
 脚本顺序：找 Python → 读 `config/workstation.yaml` → 检查端口 → 18000 可达（否则拉起 `IK_replay/capability.sh`）
-→ `scripts/camera_lock.sh acquire` 停 teleimager 推流 → 8131 → 18004（`replay.sh start`）→ 前端构建（缺失时）→ 18005。
+→ `scripts/camera_lock.sh acquire` 释放相机 → 8131 → 18004（`replay.sh start`）→ 前端构建（缺失时）→ 18005。
 退出时逆序停止，并只在“推流原本在跑”时才 `systemctl start` 恢复。
+
+`camera_lock.sh acquire` 会释放两个占用 Orbbec 的程序：
+
+- 容器 `robot_control_node_all` 内的 ROS `orbbec_camera` 节点（占头部相机 `CP0X663000B7`）：直接 `pkill`，
+  **退出时不恢复**（该容器为旧版本、暂不维护；需要时手动进容器 `roslaunch orbbec_camera gemini_330_series.launch`）。
+  用 `CAMERA_ROS_CONTAINER=` 置空可跳过这一步。
+- `teleimager-camera-capture.service` 推流：停止并记录状态，退出时按原状态恢复。
 
 ### 一次性安装：免密停止/恢复推流
 

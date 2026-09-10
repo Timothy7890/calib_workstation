@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Orbbec 相机独占：标定期间停掉 teleimager 推流服务，结束后恢复到原状态。
 #
-#   scripts/camera_lock.sh acquire   # 若推流在跑：记录“原本在跑”并停止；已停则什么都不做
-#   scripts/camera_lock.sh release   # 只在 acquire 时是“原本在跑”才重新启动（不擅自拉起别人手动停掉的服务）
+#   scripts/camera_lock.sh acquire   # 1) 停掉容器 robot_control_node_all 内的 ROS orbbec_camera 节点（不恢复）
+#                                    # 2) 若推流在跑：记录“原本在跑”并停止；已停则什么都不做
+#   scripts/camera_lock.sh release   # 只在 acquire 时推流“原本在跑”才重新启动（不擅自拉起别人手动停掉的服务）
 #   scripts/camera_lock.sh status
 #
 # 需要 deploy/sudoers-calib-camera 免密规则；没有规则时会给出明确提示并失败。
@@ -11,6 +12,9 @@ set -u
 SERVICE="${CAMERA_SERVICE:-teleimager-camera-capture.service}"
 STATE_FILE="${CAMERA_LOCK_STATE:-/tmp/calib-camera-lock.state}"
 SETTLE_S="${CAMERA_RELEASE_SETTLE_S:-2}"
+# 设为空字符串可跳过容器内 ROS 节点的停止
+ROS_CONTAINER="${CAMERA_ROS_CONTAINER-robot_control_node_all}"
+ROS_PATTERN="${CAMERA_ROS_PATTERN:-orbbec_camera}"
 
 have_sudo() {
     sudo -n /usr/bin/systemctl stop "$SERVICE" --dry-run >/dev/null 2>&1 && return 0
@@ -19,6 +23,7 @@ have_sudo() {
 }
 
 acquire() {
+    stop_ros_orbbec
     if ! systemctl is-active --quiet "$SERVICE"; then
         echo "[camera] 推流服务 $SERVICE 未运行，无需停止"
         echo "was_active=0" >"$STATE_FILE"
@@ -44,6 +49,33 @@ acquire() {
     return 0
 }
 
+# 容器 robot_control_node_all 里的 ROS orbbec_camera 节点也会独占一台 Orbbec（head 相机）。
+# 该容器是旧版本、暂不维护：启动前直接停掉它，release 时不恢复（需要时手动进容器重新 roslaunch）。
+stop_ros_orbbec() {
+    [ -n "$ROS_CONTAINER" ] || return 0
+    command -v docker >/dev/null 2>&1 || return 0
+    if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$ROS_CONTAINER"; then
+        return 0
+    fi
+    if ! docker exec "$ROS_CONTAINER" pgrep -f "$ROS_PATTERN" >/dev/null 2>&1; then
+        echo "[camera] 容器 $ROS_CONTAINER 内无 orbbec_camera 节点，无需停止"
+        return 0
+    fi
+    echo "[camera] 停止容器 $ROS_CONTAINER 内的 ROS orbbec_camera 节点（标定结束后不自动恢复）"
+    docker exec "$ROS_CONTAINER" pkill -INT -f "$ROS_PATTERN" >/dev/null 2>&1
+    for _ in $(seq 1 40); do
+        docker exec "$ROS_CONTAINER" pgrep -f "$ROS_PATTERN" >/dev/null 2>&1 || break
+        sleep 0.25
+    done
+    if docker exec "$ROS_CONTAINER" pgrep -f "$ROS_PATTERN" >/dev/null 2>&1; then
+        echo "[camera] orbbec_camera 节点未响应 SIGINT，强制结束"
+        docker exec "$ROS_CONTAINER" pkill -KILL -f "$ROS_PATTERN" >/dev/null 2>&1
+        sleep 1
+    fi
+    sleep "$SETTLE_S"
+    return 0
+}
+
 release() {
     local was_active=0
     if [ -f "$STATE_FILE" ]; then
@@ -65,6 +97,13 @@ release() {
 status() {
     echo "service=$SERVICE active=$(systemctl is-active "$SERVICE" 2>/dev/null)"
     [ -f "$STATE_FILE" ] && echo "lock: $(cat "$STATE_FILE")" || echo "lock: none"
+    if [ -n "$ROS_CONTAINER" ] && command -v docker >/dev/null 2>&1; then
+        if docker exec "$ROS_CONTAINER" pgrep -f "$ROS_PATTERN" >/dev/null 2>&1; then
+            echo "ros_orbbec_in_$ROS_CONTAINER=running"
+        else
+            echo "ros_orbbec_in_$ROS_CONTAINER=stopped"
+        fi
+    fi
 }
 
 case "${1:-}" in
