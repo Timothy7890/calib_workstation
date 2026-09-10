@@ -198,6 +198,10 @@ const doCatch = () => guard(async () => { await api.catchHold(); await refresh()
 const doDisarm = () => guard(async () => { await api.disarm(); await refresh() })
 
 async function doRun() {
+  // 手臂即将自动运动：必须经过一次显式确认，避免误触
+  const armName = job.value.arm === 'left' ? '左臂' : '右臂'
+  const planName = plans.value.find((p) => p.id === job.value.plan_id)?.name || job.value.plan_name || ''
+  if (!confirm(`即将开始自动采集：${armName}将按计划「${planName}」自动运动。\n请确认：棋盘格在画面中、周围无人、你在急停位置。\n\n开始？`)) return
   const r = await guard(() => api.run(form.value.run_name))
   if (r) {
     step.value = 'run'
@@ -443,7 +447,8 @@ onUnmounted(() => clearInterval(timer))
               </label>
             </div>
             <div class="actions">
-              <button class="btn lg" :disabled="busy || !armEngaged" @click="doRun">开始自动采集</button>
+              <button class="btn lg danger" :disabled="busy || !armEngaged" @click="doRun">开始自动采集（手臂将自动运动）</button>
+              <span class="muted small">点击后还会再确认一次</span>
               <button class="btn ghost" :disabled="busy" @click="doReset">返回重选</button>
             </div>
           </div>

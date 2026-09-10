@@ -460,8 +460,15 @@ def create_app(config: Config) -> FastAPI:
 
     @app.post("/api/calibration/run")
     def api_run(body: dict | None = None):
-        data = _require_job()
+        # 手臂会自动运动：只允许在"已接管"步骤、且请求显式带 confirm=true 时启动，
+        # 防止任何误触 / 重复请求 / 旧页面把手臂跑起来
+        data = _require_job("prepared", "engaged")
         body = body or {}
+        if body.get("confirm") is not True:
+            raise fail(409, "启动自动采集需要在页面上确认（confirm=true）")
+        replay_status = replay.get("/api/status")
+        if not (replay_status.get("arm") or {}).get("engaged"):
+            raise fail(409, "手臂尚未接管，不能开始自动采集")
         run_name = str(body.get("run_name") or "").strip()
         if run_name and not _RUN_NAME_RE.match(run_name):
             raise fail(422, "运行名可用中英文、数字、. _ -，不能含空格或斜杠")
