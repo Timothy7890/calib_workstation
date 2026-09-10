@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { api } from '../api'
 import { useConfig } from '../composables/useConfig'
@@ -8,6 +8,10 @@ import { fmt, localTime as t } from '../utils/format'
 const { config } = useConfig()
 const router = useRouter()
 const artifacts = ref([])
+// 内参只是 SDK 值的存档（随外参一并归档、一并生效），默认不在列表里显示
+const showIntrinsic = ref(false)
+const shownArtifacts = computed(() => artifacts.value.filter((m) => showIntrinsic.value || m.type !== 'intrinsic'))
+const intrinsicCount = computed(() => artifacts.value.filter((m) => m.type === 'intrinsic').length)
 const runs = ref([])
 const error = ref('')
 const busy = ref(false)
@@ -53,7 +57,7 @@ async function openRun(r) {
 
 onMounted(load)
 
-const TYPE_LABEL = { extrinsic: '外参', intrinsic: '内参', camera_transform: '内部相机转换' }
+const TYPE_LABEL = { extrinsic: '外参', intrinsic: '内参（SDK）', camera_transform: '内部相机转换' }
 const TARGET_LABEL = { hand_eye_2D_head: '2D 头部', hand_eye_2D_waist: '2D 腰部' }
 const OUTCOME = { completed: '完成', stopped: '已停止', fault: '故障' }
 
@@ -100,7 +104,10 @@ function roleLabel(id) {
       <p class="page-desc">已归档的标定产物与所有 2D 采集运行。产物目录中的 manifest.json 是推送云端平台的依据。</p>
       <div v-if="error" class="alert" style="margin-bottom: 16px">{{ error }}</div>
 
-      <h2 class="card-title">标定产物</h2>
+      <div class="row-head">
+        <h2 class="card-title">标定产物</h2>
+        <label v-if="intrinsicCount" class="muted small"><input v-model="showIntrinsic" type="checkbox" /> 显示内参存档（SDK 内参，{{ intrinsicCount }} 份）</label>
+      </div>
       <table class="plain runs" style="margin-bottom: 36px">
         <thead>
           <tr>
@@ -116,13 +123,13 @@ function roleLabel(id) {
           </tr>
         </thead>
         <tbody>
-          <tr v-if="!artifacts.length"><td colspan="9" class="muted">还没有归档的产物</td></tr>
-          <tr v-for="m in artifacts" :key="m.path">
-            <td>{{ TYPE_LABEL[m.type] || m.type }}</td>
+          <tr v-if="!shownArtifacts.length"><td colspan="9" class="muted">还没有归档的产物</td></tr>
+          <tr v-for="m in shownArtifacts" :key="m.path">
+            <td class="nowrap">{{ TYPE_LABEL[m.type] || m.type }}</td>
             <td>{{ roleLabel(m.camera_role) }}<div class="muted mono">{{ m.camera_serial }}</div></td>
             <td class="mono nowrap">{{ m.run_id }}</td>
             <td>{{ m.arm === 'left' ? '左' : '右' }}</td>
-            <td>
+            <td class="nowrap">
               <template v-if="m.type === 'extrinsic'">
                 内点 {{ m.quality?.num_inliers }} / {{ m.quality?.num_samples }}<br />
                 <span class="muted">平移 {{ fmt(m.quality?.residual_translation_mm?.mean) }} mm · 旋转 {{ fmt(m.quality?.residual_rotation_deg?.mean, 3) }}°</span>
@@ -131,11 +138,11 @@ function roleLabel(id) {
             </td>
             <td class="nowrap mono">{{ t(m.created_at) }}</td>
             <td><span class="tag" :class="STATUS[m.status]?.[1]">{{ STATUS[m.status]?.[0] || m.status }}</span></td>
-            <td>
+            <td class="nowrap files">
               <a v-for="f in m.files" :key="f.name" class="file" :href="api.fileUrl(m.type, m.camera_role, m.run_id, f.name)" download>{{ f.name }}</a>
             </td>
-            <td>
-              <button v-if="m.status !== 'active'" class="btn ghost" :disabled="busy" @click="activate(m)">设为生效</button>
+            <td class="nowrap">
+              <button v-if="m.status !== 'active'" class="btn ghost sm" :disabled="busy" @click="activate(m)">设为生效</button>
             </td>
           </tr>
         </tbody>
@@ -236,11 +243,27 @@ function roleLabel(id) {
   font-size: 11.5px;
   color: #888;
 }
+.row-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+}
+.row-head .small {
+  font-size: 12.5px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
 .file {
-  display: block;
+  display: inline-block;
   color: #1a1a1a;
   text-decoration: underline;
   font-size: 12.5px;
   line-height: 1.7;
+}
+.files .file + .file {
+  margin-left: 14px;
 }
 </style>
