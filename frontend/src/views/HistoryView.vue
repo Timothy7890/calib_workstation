@@ -54,6 +54,39 @@ async function openRun(r) {
 onMounted(load)
 
 const TYPE_LABEL = { extrinsic: '外参', intrinsic: '内参', camera_transform: '内部相机转换' }
+const TARGET_LABEL = { hand_eye_2D_head: '2D 头部', hand_eye_2D_waist: '2D 腰部' }
+const OUTCOME = { completed: '完成', stopped: '已停止', fault: '故障' }
+
+/** 只显示 runs/<arm>/<run_id> 这一段，完整路径靠复制 */
+function shortPath(p) {
+  const parts = String(p || '').split('/').filter(Boolean)
+  return parts.slice(-3).join('/')
+}
+
+const copied = ref('')
+let copiedTimer = null
+async function copyPath(p) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(p)
+    } else {
+      // 非 https / 旧浏览器：退回 execCommand
+      const ta = document.createElement('textarea')
+      ta.value = p
+      ta.style.position = 'fixed'
+      ta.style.opacity = '0'
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      document.body.removeChild(ta)
+    }
+    copied.value = p
+    clearTimeout(copiedTimer)
+    copiedTimer = setTimeout(() => (copied.value = ''), 1500)
+  } catch (e) {
+    error.value = '复制失败：' + e.message
+  }
+}
 const STATUS = { active: ['生效', 'ok'], draft: ['已归档', ''], superseded: ['已被替代', 'warn'] }
 function roleLabel(id) {
   return config.value?.cameras?.[id]?.label || id
@@ -68,7 +101,7 @@ function roleLabel(id) {
       <div v-if="error" class="alert" style="margin-bottom: 16px">{{ error }}</div>
 
       <h2 class="card-title">标定产物</h2>
-      <table class="plain" style="margin-bottom: 36px">
+      <table class="plain runs" style="margin-bottom: 36px">
         <thead>
           <tr>
             <th>类型</th>
@@ -87,7 +120,7 @@ function roleLabel(id) {
           <tr v-for="m in artifacts" :key="m.path">
             <td>{{ TYPE_LABEL[m.type] || m.type }}</td>
             <td>{{ roleLabel(m.camera_role) }}<div class="muted mono">{{ m.camera_serial }}</div></td>
-            <td class="mono">{{ m.run_id }}</td>
+            <td class="mono nowrap">{{ m.run_id }}</td>
             <td>{{ m.arm === 'left' ? '左' : '右' }}</td>
             <td>
               <template v-if="m.type === 'extrinsic'">
@@ -96,7 +129,7 @@ function roleLabel(id) {
               </template>
               <template v-else>{{ m.quality?.width }}×{{ m.quality?.height }}</template>
             </td>
-            <td>{{ t(m.created_at) }}</td>
+            <td class="nowrap mono">{{ t(m.created_at) }}</td>
             <td><span class="tag" :class="STATUS[m.status]?.[1]">{{ STATUS[m.status]?.[0] || m.status }}</span></td>
             <td>
               <a v-for="f in m.files" :key="f.name" class="file" :href="api.fileUrl(m.type, m.camera_role, m.run_id, f.name)" download>{{ f.name }}</a>
@@ -109,14 +142,14 @@ function roleLabel(id) {
       </table>
 
       <h2 class="card-title">采集运行</h2>
-      <table class="plain">
+      <table class="plain runs">
         <thead>
           <tr>
             <th>运行</th>
             <th>计划</th>
             <th>手臂</th>
             <th>结果</th>
-            <th>采集</th>
+            <th class="num">采集</th>
             <th>开始</th>
             <th>状态</th>
             <th>目录</th>
@@ -126,20 +159,25 @@ function roleLabel(id) {
         <tbody>
           <tr v-if="!runs.length"><td colspan="9" class="muted">还没有 2D 采集运行</td></tr>
           <tr v-for="r in runs" :key="r.path">
-            <td class="mono">{{ r.run_id }}</td>
-            <td>{{ r.plan_name }}<div class="muted">{{ r.target }}</div></td>
-            <td>{{ r.arm === 'left' ? '左' : '右' }}</td>
-            <td><span class="tag" :class="r.outcome === 'completed' ? 'ok' : 'warn'">{{ r.outcome || '—' }}</span></td>
-            <td>{{ r.capture_count }}</td>
-            <td>{{ t(r.started_at) }}</td>
-            <td>
+            <td class="mono nowrap">{{ r.run_id }}</td>
+            <td class="plan"><span class="ellipsis" :title="r.plan_name">{{ r.plan_name }}</span><div class="muted">{{ TARGET_LABEL[r.target] || r.target }}</div></td>
+            <td class="nowrap">{{ r.arm === 'left' ? '左' : '右' }}</td>
+            <td class="nowrap"><span class="tag" :class="r.outcome === 'completed' ? 'ok' : 'warn'">{{ OUTCOME[r.outcome] || r.outcome || '—' }}</span></td>
+            <td class="num">{{ r.capture_count }}</td>
+            <td class="nowrap mono">{{ t(r.started_at) }}</td>
+            <td class="nowrap">
               <span class="tag" :class="r.finalized ? 'ok' : r.solved ? '' : 'warn'">
                 {{ r.finalized ? '已归档' : r.solved ? '已求解未归档' : '未求解' }}
               </span>
             </td>
-            <td class="mono muted">{{ r.path }}</td>
-            <td>
-              <button v-if="!r.finalized && r.capture_count > 0" class="btn ghost" :disabled="busy" @click="openRun(r)">
+            <td class="nowrap">
+              <button class="path" :title="'点击复制完整路径\n' + r.path" @click="copyPath(r.path)">
+                <span class="mono">{{ shortPath(r.path) }}</span>
+                <span class="copy-hint">{{ copied === r.path ? '已复制' : '复制' }}</span>
+              </button>
+            </td>
+            <td class="nowrap">
+              <button v-if="!r.finalized && r.capture_count > 0" class="btn ghost sm" :disabled="busy" @click="openRun(r)">
                 {{ r.solved ? '查看结果 / 归档' : '去求解' }}
               </button>
               <span v-else-if="!r.finalized" class="muted">无样本</span>
@@ -152,6 +190,52 @@ function roleLabel(id) {
 </template>
 
 <style scoped>
+.runs {
+  table-layout: auto;
+}
+.runs .nowrap {
+  white-space: nowrap;
+}
+.runs .num {
+  text-align: right;
+  white-space: nowrap;
+}
+.runs .plan {
+  max-width: 220px;
+}
+.runs .ellipsis {
+  display: block;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.runs .btn.sm {
+  height: 30px;
+  padding: 0 12px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+.path {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 8px;
+  border: 1px dashed #d5d5d5;
+  border-radius: 4px;
+  background: #fafafa;
+  color: #333;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.path:hover {
+  border-color: #1a1a1a;
+  background: #f0f0f0;
+}
+.path .copy-hint {
+  font-size: 11.5px;
+  color: #888;
+}
 .file {
   display: block;
   color: #1a1a1a;
