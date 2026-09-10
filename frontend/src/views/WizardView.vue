@@ -427,7 +427,7 @@ onUnmounted(() => clearInterval(timer))
             </div>
             <div class="form-row" style="margin-top: 18px">
               <label class="field" style="flex: 1">
-                运行名称（可选，字母数字 . _ -）
+                运行名称（可选，中英文、数字、. _ -）
                 <input v-model="form.run_name" placeholder="留空自动生成：编号_相机_手臂_时间" />
               </label>
             </div>

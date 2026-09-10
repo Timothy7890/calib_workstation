@@ -24,7 +24,8 @@ from .config import CAMERA_ROLES, UNIT_CODE_RE, Config, validate_unit_code
 from .manifest import ARTIFACT_TYPES, ArtifactStore
 
 ARMS = ("left", "right")
-_RUN_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+# 运行名：允许中文等 Unicode 字母/数字、. _ -；不能有空格、斜杠，不能以 . 开头（与 18004/8131 一致）
+_RUN_NAME_RE = re.compile(r"^[^\W.][\w.-]{0,63}$")
 # 自定义相机位置 id（目录名）：小写字母/数字/下划线/连字符
 _ROLE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 _FRONTEND_DIST = Path(__file__).resolve().parents[1] / "frontend" / "dist"
@@ -463,7 +464,7 @@ def create_app(config: Config) -> FastAPI:
         body = body or {}
         run_name = str(body.get("run_name") or "").strip()
         if run_name and not _RUN_NAME_RE.match(run_name):
-            raise fail(422, "运行名只能包含字母、数字、. _ -")
+            raise fail(422, "运行名可用中英文、数字、. _ -，不能含空格或斜杠")
         if not run_name:
             stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
             run_name = f"{ws.unit_code}_{data['camera_role']}_{data['arm']}_{stamp}"
