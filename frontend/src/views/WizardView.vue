@@ -43,7 +43,9 @@ const plans = ref([])
 const solve = ref(null)
 
 // ---- 表单 ----
-const form = ref({ camera_role: 'head', arm: 'right', camera_serial: '', plan_id: '', run_name: '' })
+const form = ref({ camera_role: 'head', arm: 'right', camera_serial: '', plan_id: '', run_name: '', require_corners: true })
+const capturedCount = computed(() => captures.value.filter((c) => !c.skipped).length)
+const skippedCount = computed(() => captures.value.filter((c) => c.skipped).length)
 const solveForm = ref({ square_size_mm: 20, method: 'park' })
 
 const wsUrl = computed(() => streamUrl(config.value))
@@ -344,6 +346,15 @@ onUnmounted(() => clearInterval(timer))
                 </select>
               </label>
             </div>
+            <div class="form-row" style="margin-top: 14px">
+              <label class="field" style="flex: 1">
+                棋盘格未检出时
+                <select v-model="form.require_corners">
+                  <option :value="true">跳过该点不存图，继续后面的点（推荐）</option>
+                  <option :value="false">照样存图并继续（求解时再剔除）</option>
+                </select>
+              </label>
+            </div>
             <div v-if="plans.length && plans.every((p) => p.draft)" class="alert warn" style="margin-top: 10px">
               匹配的计划都还是草稿（{{ plans.map((p) => p.name).join('、') }}）：草稿缺少原点或未通过校验，不能运行。
               请到「采集计划」页为其记录原点并完成校验后再回来。
@@ -404,7 +415,7 @@ onUnmounted(() => clearInterval(timer))
               <div class="muted">
                 节点 {{ progress.route_index != null ? progress.route_index + 1 : '—' }} / {{ progress.route_count ?? '—' }}
                 · 当前 {{ progress.node_name || '—' }}
-                · 已采集 {{ captures.length }}<span v-if="sampleTotal"> / {{ sampleTotal }}</span> 张
+                · 已采集 {{ capturedCount }}<span v-if="sampleTotal"> / {{ sampleTotal }}</span> 张<span v-if="skippedCount" class="warn-text">，{{ skippedCount }} 个点未检出棋盘格已跳过</span>
               </div>
             </div>
             <div class="actions wrap">
@@ -429,7 +440,13 @@ onUnmounted(() => clearInterval(timer))
           <!-- 4 求解 -->
           <div v-else-if="step === 'solve'" class="card">
             <h2 class="card-title">求解外参</h2>
-            <p class="muted">样本 {{ job.sample_count ?? '—' }} 张 · 数据目录 <span class="mono">{{ job.run_dir }}</span></p>
+            <p class="muted">
+              样本 {{ job.sample_count ?? '—' }} 张<span v-if="job.skipped_count">，{{ job.skipped_count }} 个点未检出棋盘格已跳过</span>
+              · 数据目录 <span class="mono">{{ job.run_dir }}</span>
+            </p>
+            <div v-if="(job.sample_count ?? 0) < 6" class="alert warn" style="margin-top: 10px">
+              有效样本少于 6 张，求解可能失败或精度很差；建议检查棋盘格是否在所有采样点都能被相机看到，或调整计划后重跑。
+            </div>
             <div class="form-row">
               <label class="field">
                 方格边长（mm）
@@ -515,6 +532,10 @@ onUnmounted(() => clearInterval(timer))
 </template>
 
 <style scoped>
+.warn-text {
+  color: #b26a00;
+}
+
 .grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 380px;

@@ -388,9 +388,12 @@ def create_app(config: Config) -> FastAPI:
         if plan.get("draft"):
             raise fail(409, f"计划 {plan.get('name')} 还是草稿（缺少原点或校验未通过），请先在计划编辑里完成")
 
-        # 计划里的相机序列号以本次选择为准（回放预检会 select+校验）
-        if plan.get("camera_serial") != serial:
+        # 计划里的相机序列号以本次选择为准（回放预检会 select+校验）；
+        # 棋盘格模式：strict=未检出就跳过该点不存图，lax=照样存图（求解时再筛）
+        require_corners = bool(body.get("require_corners", True))
+        if plan.get("camera_serial") != serial or bool(plan.get("require_corners", True)) != require_corners:
             plan["camera_serial"] = serial
+            plan["require_corners"] = require_corners
             plan = replay.put(f"/api/plans/{plan_id}", plan)
         # 先切到该相机让预览就是它；首个样本前可随时再切
         camera = he2d.post("/api/camera/select", {"serial": serial})
@@ -401,6 +404,7 @@ def create_app(config: Config) -> FastAPI:
         return {"ok": True, "job": job().update(
             step="prepared", camera_role=role.id, camera_label=role.label, target=role.target,
             arm=arm, camera_serial=serial, plan_id=plan_id, plan_name=plan.get("name"),
+            require_corners=require_corners,
             camera=camera.get("camera"), run_id=None, run_dir=None,
             solved=False, finalized=False, artifacts=None,
         )}
@@ -476,7 +480,8 @@ def create_app(config: Config) -> FastAPI:
         if not run_dir:
             raise fail(409, "没有运行目录，请先运行采集")
         n = len(list((Path(run_dir) / "joints").glob("*.json"))) if (Path(run_dir) / "joints").is_dir() else 0
-        return {"ok": True, "job": job().update(step="captured", run_dir=run_dir, sample_count=n,
+        skipped = sum(1 for c in (status.get("captures") or []) if c.get("skipped"))
+        return {"ok": True, "job": job().update(step="captured", run_dir=run_dir, sample_count=n, skipped_count=skipped,
                                               outcome=status.get("state"))}
 
     @app.post("/api/calibration/solve")
