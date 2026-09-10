@@ -549,6 +549,74 @@ def create_app(config: Config) -> FastAPI:
     def api_reset():
         return {"ok": True, "job": job().reset()}
 
+    @app.post("/api/calibration/load-run")
+    def api_load_run(body: dict):
+        """把一次历史 2D 采集运行装入当前任务，直接进入求解（已有结果则进入结果/归档）步骤。
+
+        Body: {run_id, arm}。数据取自 18004 的 runs/<arm>/<run_id>/run.json。
+        """
+        run_id = str(body.get("run_id") or "").strip()
+        arm = str(body.get("arm") or "").strip()
+        if not _RUN_NAME_RE.match(run_id) or arm not in ARMS:
+            raise fail(422, "需要 run_id 与 arm")
+        current = job().snapshot()
+        if current.get("step") in {"running", "solving"}:
+            raise fail(409, f"当前任务正在 {current.get('step')}，请先完成或停止")
+        replay_state = replay.get("/api/status").get("state")
+        if replay_state in {"moving", "settling", "capturing", "returning", "paused", "preflight"}:
+            raise fail(409, f"回放服务正在运行（{replay_state}），请先停止")
+
+        run = next((r for r in replay.get("/api/runs").get("runs", [])
+                    if r.get("run_id") == run_id and r.get("arm") == arm), None)
+        if run is None:
+            raise fail(404, f"没有找到运行 {arm}/{run_id}")
+        run_dir = Path(run["path"])
+        try:
+            record = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise fail(409, f"读取 run.json 失败: {exc}") from exc
+        plan = record.get("plan") or {}
+        target = str(plan.get("target") or run.get("target") or "")
+        role = next((r for r in config.cameras.values() if r.target == target), None)
+        if role is None:
+            raise fail(409, f"运行目标 {target!r} 不属于任何已配置的相机位置，无法在工作站中求解")
+
+        joints_dir = run_dir / "joints"
+        n = len(list(joints_dir.glob("*.json"))) if joints_dir.is_dir() else 0
+        if n == 0:
+            raise fail(409, "该运行没有保存任何样本，无法求解")
+        caps = record.get("captures") or []
+        skipped = sum(1 for c in caps if c.get("skipped"))
+        no_corners = sum(1 for c in caps if c.get("corners_detected") is False)
+
+        fields: dict[str, Any] = dict(
+            step="captured", camera_role=role.id, camera_label=role.label, target=role.target,
+            arm=arm, camera_serial=plan.get("camera_serial") or run.get("camera_serial"),
+            plan_id=plan.get("id"), plan_name=plan.get("name"),
+            on_missing_corners=plan.get("on_missing_corners"),
+            run_id=run_id, run_dir=str(run_dir), started_at=record.get("started_at"),
+            sample_count=n, skipped_count=skipped, no_corners_count=no_corners,
+            usable_count=max(0, n - no_corners), sampling_aborted_at=record.get("sampling_aborted_at"),
+            outcome=record.get("outcome"), loaded_from_history=True,
+            solved=False, finalized=False, artifacts=None,
+        )
+        result_path = run_dir / "handeye_result_left.json"
+        if result_path.is_file():
+            try:
+                left = json.loads(result_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                left = {}
+            fields.update(step="solved", solved=True, square_size_mm=left.get("square_size_mm"), result_summary={
+                "num_samples": left.get("num_samples"), "num_inliers": left.get("num_inliers"),
+                "residual_translation_mm": left.get("residual_translation_mm"),
+                "residual_rotation_deg": left.get("residual_rotation_deg"),
+                "t_cam2base_m": left.get("t_cam2base_m"), "rpy_rad": left.get("rpy_rad"),
+            })
+            if store().get("extrinsic", role.id, run_id) is not None:
+                fields.update(step="finalized", finalized=True)
+        job().reset()
+        return {"ok": True, "job": job().update(**fields)}
+
     # ---------------- 产物 / 历史 ----------------
 
     @app.get("/api/artifacts")

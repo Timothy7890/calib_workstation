@@ -1,10 +1,12 @@
 <script setup>
 import { onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { api } from '../api'
 import { useConfig } from '../composables/useConfig'
 import { fmt, localTime as t } from '../utils/format'
 
 const { config } = useConfig()
+const router = useRouter()
 const artifacts = ref([])
 const runs = ref([])
 const error = ref('')
@@ -27,6 +29,21 @@ async function activate(m) {
   try {
     await api.activate(m.type, m.camera_role, m.run_id)
     await load()
+  } catch (e) {
+    error.value = e.message
+  } finally {
+    busy.value = false
+  }
+}
+
+/** 把历史运行装入当前任务，跳到向导的求解 / 结果步骤 */
+async function openRun(r) {
+  if (busy.value) return
+  busy.value = true
+  error.value = ''
+  try {
+    await api.loadRun(r.run_id, r.arm)
+    router.push({ name: 'calibrate' })
   } catch (e) {
     error.value = e.message
   } finally {
@@ -103,10 +120,11 @@ function roleLabel(id) {
             <th>开始</th>
             <th>状态</th>
             <th>目录</th>
+            <th></th>
           </tr>
         </thead>
         <tbody>
-          <tr v-if="!runs.length"><td colspan="8" class="muted">还没有 2D 采集运行</td></tr>
+          <tr v-if="!runs.length"><td colspan="9" class="muted">还没有 2D 采集运行</td></tr>
           <tr v-for="r in runs" :key="r.path">
             <td class="mono">{{ r.run_id }}</td>
             <td>{{ r.plan_name }}<div class="muted">{{ r.target }}</div></td>
@@ -120,6 +138,12 @@ function roleLabel(id) {
               </span>
             </td>
             <td class="mono muted">{{ r.path }}</td>
+            <td>
+              <button v-if="!r.finalized && r.capture_count > 0" class="btn ghost" :disabled="busy" @click="openRun(r)">
+                {{ r.solved ? '查看结果 / 归档' : '去求解' }}
+              </button>
+              <span v-else-if="!r.finalized" class="muted">无样本</span>
+            </td>
           </tr>
         </tbody>
       </table>

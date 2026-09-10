@@ -441,6 +441,9 @@ onUnmounted(() => clearInterval(timer))
           <!-- 4 求解 -->
           <div v-else-if="step === 'solve'" class="card">
             <h2 class="card-title">求解外参</h2>
+            <div v-if="job.loaded_from_history" class="alert info" style="margin-bottom: 10px">
+              这是从「标定记录」装入的历史运行 <span class="mono">{{ job.run_id }}</span>（{{ job.camera_label }} · {{ job.arm === 'left' ? '左臂' : '右臂' }}），不涉及手臂动作，直接求解即可。
+            </div>
             <p class="muted">
               样本 {{ job.sample_count ?? '—' }} 张<span v-if="job.no_corners_count">，其中 {{ job.no_corners_count }} 张未检出棋盘格（求解时自动剔除）</span><span v-if="job.sampling_aborted_at">；在 {{ job.sampling_aborted_at }} 停止采样返回</span><span v-if="job.skipped_count">，{{ job.skipped_count }} 个点采集失败</span>
               · 数据目录 <span class="mono">{{ job.run_dir }}</span>
