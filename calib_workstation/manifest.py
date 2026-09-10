@@ -224,6 +224,23 @@ class ArtifactStore:
             json.dumps(pointer, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         return manifest
 
+    def delete(self, artifact_type: str, camera_role: str, run_id: str) -> dict[str, Any]:
+        """删除一个产物包目录。若它正是当前生效项，则清掉 active.json（该位置回到"未标定"）。
+
+        只删 calibrations/ 下的归档副本，原始采集目录（18004 runs/）不受影响。
+        """
+        target = self.artifact_dir(artifact_type, camera_role, run_id)
+        if not (target / "manifest.json").is_file():
+            raise FileNotFoundError(f"产物不存在: {target}")
+        was_active = False
+        pointer_path = self.active_pointer(artifact_type, camera_role)
+        pointer = _read_json(pointer_path) or {}
+        if pointer.get("run_id") == run_id:
+            pointer_path.unlink(missing_ok=True)
+            was_active = True
+        shutil.rmtree(target)
+        return {"type": artifact_type, "camera_role": camera_role, "run_id": run_id, "was_active": was_active}
+
     def active(self, artifact_type: str, camera_role: str) -> dict[str, Any] | None:
         pointer = _read_json(self.active_pointer(artifact_type, camera_role))
         if not pointer or not pointer.get("run_id"):

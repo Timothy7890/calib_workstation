@@ -72,6 +72,8 @@ export const api = {
   activeArtifacts: () => request('GET', '/api/artifacts/active'),
   activate: (type, role, runId) =>
     request('POST', `/api/artifacts/${type}/${role}/${encodeURIComponent(runId)}/activate`),
+  deleteArtifact: (type, role, runId) =>
+    request('DELETE', `/api/artifacts/${type}/${role}/${encodeURIComponent(runId)}`),
   fileUrl: (type, role, runId, name) =>
     `/api/artifacts/${type}/${role}/${encodeURIComponent(runId)}/files/${encodeURIComponent(name)}`,
   runs: () => request('GET', '/api/runs'),

@@ -640,11 +640,42 @@ def create_app(config: Config) -> FastAPI:
         return manifest
 
     @app.post("/api/artifacts/{artifact_type}/{role}/{run_id}/activate")
-    def api_artifact_activate(artifact_type: str, role: str, run_id: str):
+    def api_artifact_activate(artifact_type: str, role: str, run_id: str, all_types: bool = True):
+        """设为生效。默认连同同一 run_id 一起归档的其他类型（外参 ↔ 内参）一并切换，
+        保证生效的外参与它求解时用的内参始终配对。"""
         try:
-            return store().set_active(artifact_type, role, run_id)
+            result = store().set_active(artifact_type, role, run_id)
         except FileNotFoundError as exc:
             raise fail(404, str(exc)) from exc
+        if all_types:
+            for t in ARTIFACT_TYPES:
+                if t != artifact_type and store().get(t, role, run_id) is not None:
+                    store().set_active(t, role, run_id)
+        return result
+
+    @app.delete("/api/artifacts/{artifact_type}/{role}/{run_id}")
+    def api_artifact_delete(artifact_type: str, role: str, run_id: str, all_types: bool = True):
+        """删除归档产物。默认把同一 run_id 一起归档的所有类型（外参 + 内参）都删掉；
+        只删 calibrations/ 下的副本，18004 的原始采集目录保留，之后仍可在"采集运行"里重新归档。
+        """
+        if artifact_type not in ARTIFACT_TYPES:
+            raise fail(422, f"type 只能是 {ARTIFACT_TYPES}")
+        camera_role(role)
+        if not _RUN_NAME_RE.match(run_id):
+            raise fail(422, "非法 run_id")
+        types = list(ARTIFACT_TYPES) if all_types else [artifact_type]
+        deleted = []
+        for t in types:
+            try:
+                deleted.append(store().delete(t, role, run_id))
+            except FileNotFoundError:
+                if t == artifact_type:
+                    raise fail(404, "产物不存在")
+        # 当前任务若正是这次归档，退回"已求解"状态，允许重新归档
+        current = job().snapshot()
+        if current.get("run_id") == run_id and current.get("camera_role") == role and current.get("finalized"):
+            job().update(step="solved", finalized=False, activated=False, artifacts=None)
+        return {"ok": True, "deleted": deleted}
 
     @app.get("/api/artifacts/{artifact_type}/{role}/{run_id}/files/{name}")
     def api_artifact_file(artifact_type: str, role: str, run_id: str, name: str):

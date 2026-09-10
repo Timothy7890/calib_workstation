@@ -26,6 +26,22 @@ async function load() {
   }
 }
 
+async function removeArtifact(m) {
+  if (busy.value) return
+  const note = m.status === 'active' ? '\n它当前是生效项，删除后该相机位置将回到"未标定"。' : ''
+  if (!confirm(`删除 ${roleLabel(m.camera_role)} · ${m.run_id} 的归档产物（外参 + 内参）？${note}\n原始采集数据保留，之后仍可在下方"采集运行"里重新归档。`)) return
+  busy.value = true
+  error.value = ''
+  try {
+    await api.deleteArtifact(m.type, m.camera_role, m.run_id)
+    await load()
+  } catch (e) {
+    error.value = e.message
+  } finally {
+    busy.value = false
+  }
+}
+
 async function activate(m) {
   if (busy.value) return
   busy.value = true
@@ -141,8 +157,9 @@ function roleLabel(id) {
             <td class="nowrap files">
               <a v-for="f in m.files" :key="f.name" class="file" :href="api.fileUrl(m.type, m.camera_role, m.run_id, f.name)" download>{{ f.name }}</a>
             </td>
-            <td class="nowrap">
+            <td class="nowrap actions-cell">
               <button v-if="m.status !== 'active'" class="btn ghost sm" :disabled="busy" @click="activate(m)">设为生效</button>
+              <button class="btn ghost sm danger-text" :disabled="busy" @click="removeArtifact(m)">删除</button>
             </td>
           </tr>
         </tbody>
@@ -255,6 +272,16 @@ function roleLabel(id) {
   align-items: center;
   gap: 6px;
   cursor: pointer;
+}
+.actions-cell .btn + .btn {
+  margin-left: 6px;
+}
+.danger-text {
+  color: #b42318;
+  border-color: #e6b3ad;
+}
+.danger-text:hover {
+  background: #fdf1ef;
 }
 .file {
   display: inline-block;
