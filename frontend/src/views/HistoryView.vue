@@ -29,7 +29,7 @@ async function load() {
 async function removeArtifact(m) {
   if (busy.value) return
   const note = m.status === 'active' ? '\n它当前是生效项，删除后该相机位置将回到"未标定"。' : ''
-  if (!confirm(`删除 ${roleLabel(m.camera_role)} · ${m.run_id} 的归档产物（外参 + 内参）？${note}\n原始采集数据保留，之后仍可在下方"采集运行"里重新归档。`)) return
+  if (!confirm(`删除 ${roleLabel(m.camera_role, m)} · ${m.run_id} 的归档产物（外参 + 内参）？${note}\n原始采集数据保留，之后仍可在下方"采集运行"里重新归档。`)) return
   busy.value = true
   error.value = ''
   try {
@@ -108,8 +108,8 @@ async function copyPath(p) {
   }
 }
 const STATUS = { active: ['生效', 'ok'], draft: ['已归档', ''], superseded: ['已被替代', 'warn'] }
-function roleLabel(id) {
-  return config.value?.cameras?.[id]?.label || id
+function roleLabel(id, m) {
+  return config.value?.cameras?.[id]?.label || m?.camera_label || id
 }
 </script>
 
@@ -142,7 +142,7 @@ function roleLabel(id) {
           <tr v-if="!shownArtifacts.length"><td colspan="9" class="muted">还没有归档的产物</td></tr>
           <tr v-for="m in shownArtifacts" :key="m.path">
             <td class="nowrap">{{ TYPE_LABEL[m.type] || m.type }}</td>
-            <td>{{ roleLabel(m.camera_role) }}<div class="muted mono">{{ m.camera_serial }}</div></td>
+            <td>{{ roleLabel(m.camera_role, m) }}<div class="muted mono">{{ m.camera_serial }}</div></td>
             <td class="mono nowrap">{{ m.run_id }}</td>
             <td>{{ m.arm === 'left' ? '左' : '右' }}</td>
             <td class="nowrap">

@@ -136,6 +136,7 @@ class ArtifactStore:
         run_id: str,
         arm: str,
         overwrite: bool = False,
+        camera_label: str | None = None,
     ) -> dict[str, Any]:
         """把一次 2D 运行目录里的求解结果打成 extrinsic + intrinsic 两个产物包。"""
         result_path = run_dir / "handeye_result_left.json"
@@ -176,6 +177,7 @@ class ArtifactStore:
                            "tip_link": result.get("tip_link")},
                 "primary_file": result_path.name,
                 "T_cam2base": result.get("T_cam2base"),
+                "camera_label": camera_label,
             },
             overwrite=overwrite,
         )
@@ -195,7 +197,7 @@ class ArtifactStore:
                     "height": intrinsics.get("height"),
                     "source": intrinsics.get("source"),
                 },
-                extra={"primary_file": intrinsics_path.name},
+                extra={"primary_file": intrinsics_path.name, "camera_label": camera_label},
                 overwrite=overwrite,
             )
         return artifacts
@@ -240,6 +242,15 @@ class ArtifactStore:
             was_active = True
         shutil.rmtree(target)
         return {"type": artifact_type, "camera_role": camera_role, "run_id": run_id, "was_active": was_active}
+
+    def roles(self) -> list[str]:
+        """已归档过的所有相机位置 id（含自定义），按目录名去重。"""
+        found: set[str] = set()
+        for artifact_type in ARTIFACT_TYPES:
+            base = self.root / artifact_type
+            if base.is_dir():
+                found.update(p.name for p in base.iterdir() if p.is_dir())
+        return sorted(found)
 
     def active(self, artifact_type: str, camera_role: str) -> dict[str, Any] | None:
         pointer = _read_json(self.active_pointer(artifact_type, camera_role))

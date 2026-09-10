@@ -25,6 +25,8 @@ from .manifest import ARTIFACT_TYPES, ArtifactStore
 
 ARMS = ("left", "right")
 _RUN_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+# 自定义相机位置 id（目录名）：小写字母/数字/下划线/连字符
+_ROLE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 _FRONTEND_DIST = Path(__file__).resolve().parents[1] / "frontend" / "dist"
 _CALIB_ROOT = Path(__file__).resolve().parents[2]
 
@@ -217,6 +219,17 @@ def create_app(config: Config) -> FastAPI:
         if role not in config.cameras:
             raise fail(422, f"未知相机位置 {role!r}，可选 {list(config.cameras)}")
         return config.cameras[role]
+
+    def any_role(role: str) -> str:
+        """产物操作允许的相机位置：配置里的 head/waist，或已归档 / 自定义的合法 id。"""
+        if role in config.cameras or _ROLE_ID_RE.match(role or ""):
+            return role
+        raise fail(422, f"非法相机位置 {role!r}")
+
+    def role_label(role: str, label: str | None = None) -> str:
+        if role in config.cameras:
+            return config.cameras[role].label
+        return (label or "").strip() or role
 
     # ---------------- 配置 / 健康 ----------------
 
@@ -534,6 +547,7 @@ def create_app(config: Config) -> FastAPI:
             artifacts = store().finalize_2d_run(
                 run_dir=Path(data["run_dir"]), camera_role=data["camera_role"],
                 run_id=data["run_id"], arm=data["arm"], overwrite=bool(body.get("overwrite", False)),
+                camera_label=data.get("camera_label"),
             )
         except FileExistsError as exc:
             raise fail(409, str(exc)) from exc
@@ -548,6 +562,23 @@ def create_app(config: Config) -> FastAPI:
     @app.post("/api/calibration/reset")
     def api_reset():
         return {"ok": True, "job": job().reset()}
+
+    @app.post("/api/calibration/role")
+    def api_set_job_role(body: dict):
+        """求解 / 归档前改这次标定归属的相机位置。Body: {camera_role, camera_label?}
+
+        camera_role 可以是配置里的 head/waist，也可以是自定义 id（如 chest），此时需给 camera_label。
+        已归档（finalized）后不能再改。
+        """
+        data = _require_job("captured", "solved")
+        role = str(body.get("camera_role") or "").strip().lower()
+        any_role(role)
+        label = role_label(role, str(body.get("camera_label") or ""))
+        if role not in config.cameras and not str(body.get("camera_label") or "").strip():
+            raise fail(422, "自定义相机位置需要填写名称")
+        target = config.cameras[role].target if role in config.cameras else None
+        return {"ok": True, "job": job().update(camera_role=role, camera_label=label, target=target,
+                                              camera_role_custom=role not in config.cameras)}
 
     @app.post("/api/calibration/load-run")
     def api_load_run(body: dict):
@@ -612,8 +643,13 @@ def create_app(config: Config) -> FastAPI:
                 "residual_rotation_deg": left.get("residual_rotation_deg"),
                 "t_cam2base_m": left.get("t_cam2base_m"), "rpy_rad": left.get("rpy_rad"),
             })
-            if store().get("extrinsic", role.id, run_id) is not None:
-                fields.update(step="finalized", finalized=True)
+            # 已归档过（可能归到了别的相机位置，如自定义名）：沿用归档时的位置
+            archived = next((m for m in store().list("extrinsic") if m.get("run_id") == run_id), None)
+            if archived is not None:
+                fields.update(step="finalized", finalized=True,
+                              camera_role=archived.get("camera_role"),
+                              camera_label=archived.get("camera_label") or role_label(archived.get("camera_role")),
+                              camera_role_custom=archived.get("camera_role") not in config.cameras)
         job().reset()
         return {"ok": True, "job": job().update(**fields)}
 
@@ -629,7 +665,8 @@ def create_app(config: Config) -> FastAPI:
     def api_artifacts_active():
         out: dict[str, Any] = {}
         for artifact_type in ARTIFACT_TYPES:
-            out[artifact_type] = {role: store().active(artifact_type, role) for role in CAMERA_ROLES if role in config.cameras}
+            roles = [r for r in CAMERA_ROLES if r in config.cameras] + [r for r in store().roles() if r not in config.cameras]
+            out[artifact_type] = {role: store().active(artifact_type, role) for role in roles}
         return out
 
     @app.get("/api/artifacts/{artifact_type}/{role}/{run_id}")
@@ -643,6 +680,7 @@ def create_app(config: Config) -> FastAPI:
     def api_artifact_activate(artifact_type: str, role: str, run_id: str, all_types: bool = True):
         """设为生效。默认连同同一 run_id 一起归档的其他类型（外参 ↔ 内参）一并切换，
         保证生效的外参与它求解时用的内参始终配对。"""
+        any_role(role)
         try:
             result = store().set_active(artifact_type, role, run_id)
         except FileNotFoundError as exc:
@@ -660,7 +698,7 @@ def create_app(config: Config) -> FastAPI:
         """
         if artifact_type not in ARTIFACT_TYPES:
             raise fail(422, f"type 只能是 {ARTIFACT_TYPES}")
-        camera_role(role)
+        any_role(role)
         if not _RUN_NAME_RE.match(run_id):
             raise fail(422, "非法 run_id")
         types = list(ARTIFACT_TYPES) if all_types else [artifact_type]

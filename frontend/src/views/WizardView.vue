@@ -205,6 +205,46 @@ async function doMarkCaptured() {
   }
 }
 
+// ---- 求解 / 归档前改相机位置（头 / 腰 / 自定义）----
+const roleEdit = ref({ role: '', customId: '', customLabel: '' })
+function syncRoleEdit() {
+  const custom = !!job.value.camera_role_custom
+  roleEdit.value = {
+    role: custom ? '__custom__' : job.value.camera_role || '',
+    customId: custom ? job.value.camera_role : '',
+    customLabel: custom ? job.value.camera_label : '',
+  }
+}
+watch(() => [job.value.camera_role, job.value.camera_role_custom], syncRoleEdit, { immediate: true })
+async function applyRole() {
+  let role = roleEdit.value.role
+  let label = ''
+  if (role === '__custom__') {
+    role = (roleEdit.value.customId || '').trim().toLowerCase()
+    label = (roleEdit.value.customLabel || '').trim()
+    if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(role)) {
+      error.value = '自定义 id 只能用小写字母、数字、下划线、连字符（如 chest）'
+      return
+    }
+    if (!label) {
+      error.value = '请填写自定义位置的名称'
+      return
+    }
+  }
+  if (!role) return
+  const r = await guard(() => api.setJobRole(role, label))
+  if (r) job.value = r.job
+}
+const roleDirty = computed(() => {
+  const e = roleEdit.value
+  if (e.role === '__custom__') return !job.value.camera_role_custom || e.customId !== job.value.camera_role || e.customLabel !== job.value.camera_label
+  return e.role !== job.value.camera_role
+})
+
+function resolveAgain() {
+  step.value = 'solve'
+}
+
 async function doSolve() {
   const r = await guard(() => api.solve(solveForm.value))
   if (r) await pollSolve()
@@ -451,6 +491,27 @@ onUnmounted(() => clearInterval(timer))
             <div v-if="(job.usable_count ?? job.sample_count ?? 0) < 6" class="alert warn" style="margin-top: 10px">
               检出棋盘格的有效样本少于 6 张，求解可能失败或精度很差。可在「标定记录」查看本次保存的图片，确认棋盘格是否在相机视野内，再调整计划重跑。
             </div>
+            <div class="role-edit">
+              <label class="field">
+                归属相机位置
+                <select v-model="roleEdit.role">
+                  <option v-for="r in roleOptions" :key="r.id" :value="r.id">{{ r.label }}</option>
+                  <option value="__custom__">其他（自定义）…</option>
+                </select>
+              </label>
+              <template v-if="roleEdit.role === '__custom__'">
+                <label class="field">
+                  自定义 id（目录名）
+                  <input v-model="roleEdit.customId" placeholder="如 chest" />
+                </label>
+                <label class="field">
+                  显示名称
+                  <input v-model="roleEdit.customLabel" placeholder="如 胸部相机" />
+                </label>
+              </template>
+              <button class="btn ghost sm" :disabled="busy || !roleDirty" @click="applyRole">应用</button>
+              <span class="muted small">决定归档到 calibrations/&lt;type&gt;/<b>{{ job.camera_role }}</b>/ 下，并作为该位置的生效外参。</span>
+            </div>
             <div class="form-row">
               <label class="field">
                 方格边长（mm）
@@ -504,11 +565,16 @@ onUnmounted(() => clearInterval(timer))
             <div v-if="job.finalized" class="alert info" style="margin-top: 14px">
               已归档{{ job.activated ? '并设为当前生效' : '（未生效）' }}：外参 + 内参产物已写入机器人 {{ config?.robot.unit_code }} 的标定目录。
             </div>
+            <p class="muted" style="margin-top: 10px">
+              归档到相机位置：<b>{{ job.camera_label || job.camera_role }}</b>（<span class="mono">{{ job.camera_role }}</span>）
+              <a v-if="!job.finalized" href="#" @click.prevent="resolveAgain">修改位置 / 重新求解</a>
+            </p>
             <div class="actions wrap">
               <button class="btn lg" :disabled="busy || job.finalized" @click="doFinalize(true)">确认生效并归档</button>
               <button class="btn ghost" :disabled="busy || job.finalized" @click="doFinalize(false)">仅归档，不生效</button>
               <button class="btn ghost" :disabled="busy" @click="doDisarm">解除接管</button>
               <RouterLink class="btn ghost" :to="{ name: 'history' }">查看标定记录</RouterLink>
+              <button v-if="!job.finalized" class="btn ghost" :disabled="busy" @click="resolveAgain">重新求解</button>
               <button class="btn ghost" :disabled="busy" @click="doReset">开始新的标定</button>
             </div>
           </div>
@@ -559,6 +625,30 @@ onUnmounted(() => clearInterval(timer))
 
 .form-row + .form-row {
   margin-top: 12px;
+}
+
+.role-edit {
+  display: flex;
+  gap: 14px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  margin-bottom: 14px;
+  border: 1px solid #e6e6e6;
+  border-radius: 6px;
+  background: #fafafa;
+}
+.role-edit .field {
+  min-width: 160px;
+}
+.role-edit .btn.sm {
+  height: 32px;
+  padding: 0 12px;
+  font-size: 13px;
+}
+.role-edit .small {
+  font-size: 12px;
+  align-self: center;
 }
 
 .actions {

@@ -60,6 +60,8 @@ export const api = {
   solveStatus: () => request('GET', '/api/calibration/solve/status'),
   finalize: (payload) => request('POST', '/api/calibration/finalize', payload),
   resetJob: () => request('POST', '/api/calibration/reset'),
+  setJobRole: (cameraRole, cameraLabel) =>
+    request('POST', '/api/calibration/role', { camera_role: cameraRole, camera_label: cameraLabel || '' }),
   loadRun: (runId, arm) => request('POST', '/api/calibration/load-run', { run_id: runId, arm }),
 
   artifacts: (type, role) => {
