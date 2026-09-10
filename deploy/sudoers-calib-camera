@@ -1,0 +1,5 @@
+# 标定期间需要独占 Orbbec 相机：允许 robot 免密停止/恢复推流服务，且只允许这两条命令。
+# 安装（一次即可，需要密码）：
+#   sudo install -m 0440 -o root -g root deploy/sudoers-calib-camera /etc/sudoers.d/calib-camera
+#   sudo visudo -c        # 校验语法
+robot ALL=(root) NOPASSWD: /usr/bin/systemctl stop teleimager-camera-capture.service, /usr/bin/systemctl start teleimager-camera-capture.service

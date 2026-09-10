@@ -1,0 +1,27 @@
+# 标定工作站 18005 配置。机器人编号不写在这里：首次打开页面时输入，
+# 保存在 <data_root>/workstation_state.json，页面右上角可切换。
+robot:
+  vendor: unitree
+  model: h2
+
+services:
+  hand_eye_2d: http://127.0.0.1:8131      # 2D 相机 + 采集 + 求解
+  replay: http://127.0.0.1:18004          # 轨迹回放（人工监护）
+  capability: http://127.0.0.1:18000      # 能力中心
+
+# 产物根目录；实际落 <data_root>/<unit_code>/calibrations/<type>/<camera_role>/<run_id>/
+data_root: /home/robot/yx/project/calib/calib_workstation_data
+
+# 相机位置 → 回放计划目标。序列号不写在这里：首次标定时在页面枚举/预览后选择，
+# 按机器人编号记住（<data_root>/<编号>/state/cameras.json），下次自动选中，可随时重选。
+cameras:
+  head:
+    label: 头部相机
+    target: hand_eye_2D_head
+  waist:
+    label: 腰部相机
+    target: hand_eye_2D_waist
+
+board:
+  size: 11x8              # 棋盘格内角点 列x行
+  square_size_mm: 20.0    # 方格边长，求解时可改
