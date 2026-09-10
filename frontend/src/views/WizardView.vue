@@ -93,10 +93,21 @@ async function guard(fn, { silent = false } = {}) {
   }
 }
 
+// 轮询与按钮动作可能并发：只接受最新一次请求的结果，避免旧快照把刚更新的 job 盖回去
+let refreshSeq = 0
+let jobVersion = 0
+function setJob(j) {
+  job.value = j || {}
+  jobVersion += 1
+}
 async function refresh() {
+  const seq = ++refreshSeq
+  const versionAtStart = jobVersion
   try {
     const s = await api.calibration()
-    job.value = s.job || {}
+    if (seq !== refreshSeq) return
+    // 期间有按钮动作直接写过 job（版本变了），就不用这份旧快照覆盖它
+    if (jobVersion === versionAtStart) job.value = s.job || {}
     replay.value = s.replay
     session.value = s.session
     if (s.replay_error) notice.value = s.replay_error
@@ -175,7 +186,7 @@ async function previewCamera() {
 async function doPrepare() {
   const r = await guard(() => api.prepare({ ...form.value }))
   if (r) {
-    job.value = r.job
+    setJob(r.job)
     step.value = 'arm'
     await refresh()
   }
@@ -200,7 +211,7 @@ const doStop = () => guard(async () => { await api.stop(); await refresh() })
 async function doMarkCaptured() {
   const r = await guard(() => api.markCaptured())
   if (r) {
-    job.value = r.job
+    setJob(r.job)
     step.value = 'solve'
   }
 }
@@ -233,7 +244,7 @@ async function applyRole() {
   }
   if (!role) return
   const r = await guard(() => api.setJobRole(role, label))
-  if (r) job.value = r.job
+  if (r) setJob(r.job)
 }
 const roleDirty = computed(() => {
   const e = roleEdit.value
@@ -253,7 +264,7 @@ async function doSolve() {
 async function pollSolve() {
   try {
     solve.value = await api.solveStatus()
-    job.value = solve.value.job || job.value
+    if (solve.value.job) setJob(solve.value.job)
     if (job.value.step === 'solved') step.value = 'result'
   } catch (e) {
     error.value = e.message
@@ -262,7 +273,7 @@ async function pollSolve() {
 
 async function doFinalize(activate) {
   const r = await guard(() => api.finalize({ activate }))
-  if (r) job.value = r.job
+  if (r) setJob(r.job)
 }
 
 async function doReset() {
@@ -271,7 +282,7 @@ async function doReset() {
     return
   }
   await guard(() => api.resetJob())
-  job.value = {}
+  setJob({})
   solve.value = null
   step.value = 'setup'
 }
@@ -488,7 +499,7 @@ onUnmounted(() => clearInterval(timer))
               样本 {{ job.sample_count ?? '—' }} 张<span v-if="job.no_corners_count">，其中 {{ job.no_corners_count }} 张未检出棋盘格（求解时自动剔除）</span><span v-if="job.sampling_aborted_at">；在 {{ job.sampling_aborted_at }} 停止采样返回</span><span v-if="job.skipped_count">，{{ job.skipped_count }} 个点采集失败</span>
               · 数据目录 <span class="mono">{{ job.run_dir }}</span>
             </p>
-            <div v-if="(job.usable_count ?? job.sample_count ?? 0) < 6" class="alert warn" style="margin-top: 10px">
+            <div v-if="job.sample_count != null && (job.usable_count ?? job.sample_count) < 6" class="alert warn" style="margin-top: 10px">
               检出棋盘格的有效样本少于 6 张，求解可能失败或精度很差。可在「标定记录」查看本次保存的图片，确认棋盘格是否在相机视野内，再调整计划重跑。
             </div>
             <div class="role-edit">
