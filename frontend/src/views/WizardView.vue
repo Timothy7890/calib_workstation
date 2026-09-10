@@ -43,8 +43,9 @@ const plans = ref([])
 const solve = ref(null)
 
 // ---- 表单 ----
-const form = ref({ camera_role: 'head', arm: 'right', camera_serial: '', plan_id: '', run_name: '', require_corners: true })
+const form = ref({ camera_role: 'head', arm: 'right', camera_serial: '', plan_id: '', run_name: '', on_missing_corners: 'continue' })
 const capturedCount = computed(() => captures.value.filter((c) => !c.skipped).length)
+const noCornersCount = computed(() => captures.value.filter((c) => c.corners_detected === false).length)
 const skippedCount = computed(() => captures.value.filter((c) => c.skipped).length)
 const solveForm = ref({ square_size_mm: 20, method: 'park' })
 
@@ -348,10 +349,10 @@ onUnmounted(() => clearInterval(timer))
             </div>
             <div class="form-row" style="margin-top: 14px">
               <label class="field" style="flex: 1">
-                棋盘格未检出时
-                <select v-model="form.require_corners">
-                  <option :value="true">跳过该点不存图，继续后面的点（推荐）</option>
-                  <option :value="false">照样存图并继续（求解时再剔除）</option>
+                采样点未检出棋盘格时（图像和关节角都会保存，求解会自动剔除无角点的图）
+                <select v-model="form.on_missing_corners">
+                  <option value="continue">继续采集后面的点（推荐）</option>
+                  <option value="abort">停止采样，沿剩余过渡点走到最后再回原点</option>
                 </select>
               </label>
             </div>
@@ -415,7 +416,7 @@ onUnmounted(() => clearInterval(timer))
               <div class="muted">
                 节点 {{ progress.route_index != null ? progress.route_index + 1 : '—' }} / {{ progress.route_count ?? '—' }}
                 · 当前 {{ progress.node_name || '—' }}
-                · 已采集 {{ capturedCount }}<span v-if="sampleTotal"> / {{ sampleTotal }}</span> 张<span v-if="skippedCount" class="warn-text">，{{ skippedCount }} 个点未检出棋盘格已跳过</span>
+                · 已采集 {{ capturedCount }}<span v-if="sampleTotal"> / {{ sampleTotal }}</span> 张<span v-if="noCornersCount" class="warn-text">，其中 {{ noCornersCount }} 张未检出棋盘格</span><span v-if="progress.sampling_aborted" class="warn-text">，已在 {{ progress.sampling_aborted }} 停止采样、正在返回</span><span v-if="skippedCount" class="warn-text">，{{ skippedCount }} 个点采集失败</span>
               </div>
             </div>
             <div class="actions wrap">
@@ -441,11 +442,11 @@ onUnmounted(() => clearInterval(timer))
           <div v-else-if="step === 'solve'" class="card">
             <h2 class="card-title">求解外参</h2>
             <p class="muted">
-              样本 {{ job.sample_count ?? '—' }} 张<span v-if="job.skipped_count">，{{ job.skipped_count }} 个点未检出棋盘格已跳过</span>
+              样本 {{ job.sample_count ?? '—' }} 张<span v-if="job.no_corners_count">，其中 {{ job.no_corners_count }} 张未检出棋盘格（求解时自动剔除）</span><span v-if="job.sampling_aborted_at">；在 {{ job.sampling_aborted_at }} 停止采样返回</span><span v-if="job.skipped_count">，{{ job.skipped_count }} 个点采集失败</span>
               · 数据目录 <span class="mono">{{ job.run_dir }}</span>
             </p>
-            <div v-if="(job.sample_count ?? 0) < 6" class="alert warn" style="margin-top: 10px">
-              有效样本少于 6 张，求解可能失败或精度很差；建议检查棋盘格是否在所有采样点都能被相机看到，或调整计划后重跑。
+            <div v-if="(job.usable_count ?? job.sample_count ?? 0) < 6" class="alert warn" style="margin-top: 10px">
+              检出棋盘格的有效样本少于 6 张，求解可能失败或精度很差。可在「标定记录」查看本次保存的图片，确认棋盘格是否在相机视野内，再调整计划重跑。
             </div>
             <div class="form-row">
               <label class="field">

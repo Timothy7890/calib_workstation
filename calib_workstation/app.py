@@ -389,11 +389,13 @@ def create_app(config: Config) -> FastAPI:
             raise fail(409, f"计划 {plan.get('name')} 还是草稿（缺少原点或校验未通过），请先在计划编辑里完成")
 
         # 计划里的相机序列号以本次选择为准（回放预检会 select+校验）；
-        # 棋盘格模式：strict=未检出就跳过该点不存图，lax=照样存图（求解时再筛）
-        require_corners = bool(body.get("require_corners", True))
-        if plan.get("camera_serial") != serial or bool(plan.get("require_corners", True)) != require_corners:
+        # 未检出棋盘格时：图像总是保存；continue=继续采后面的点，abort=停止采样沿剩余路径回原点
+        on_missing = str(body.get("on_missing_corners") or "continue")
+        if on_missing not in ("continue", "abort"):
+            raise fail(422, "on_missing_corners 只能是 continue 或 abort")
+        if plan.get("camera_serial") != serial or plan.get("on_missing_corners") != on_missing:
             plan["camera_serial"] = serial
-            plan["require_corners"] = require_corners
+            plan["on_missing_corners"] = on_missing
             plan = replay.put(f"/api/plans/{plan_id}", plan)
         # 先切到该相机让预览就是它；首个样本前可随时再切
         camera = he2d.post("/api/camera/select", {"serial": serial})
@@ -404,7 +406,7 @@ def create_app(config: Config) -> FastAPI:
         return {"ok": True, "job": job().update(
             step="prepared", camera_role=role.id, camera_label=role.label, target=role.target,
             arm=arm, camera_serial=serial, plan_id=plan_id, plan_name=plan.get("name"),
-            require_corners=require_corners,
+            on_missing_corners=on_missing,
             camera=camera.get("camera"), run_id=None, run_dir=None,
             solved=False, finalized=False, artifacts=None,
         )}
@@ -480,8 +482,12 @@ def create_app(config: Config) -> FastAPI:
         if not run_dir:
             raise fail(409, "没有运行目录，请先运行采集")
         n = len(list((Path(run_dir) / "joints").glob("*.json"))) if (Path(run_dir) / "joints").is_dir() else 0
-        skipped = sum(1 for c in (status.get("captures") or []) if c.get("skipped"))
+        caps = status.get("captures") or []
+        skipped = sum(1 for c in caps if c.get("skipped"))
+        no_corners = sum(1 for c in caps if c.get("corners_detected") is False)
         return {"ok": True, "job": job().update(step="captured", run_dir=run_dir, sample_count=n, skipped_count=skipped,
+                                              no_corners_count=no_corners, usable_count=max(0, n - no_corners),
+                                              sampling_aborted_at=(status.get("progress") or {}).get("sampling_aborted"),
                                               outcome=status.get("state"))}
 
     @app.post("/api/calibration/solve")
