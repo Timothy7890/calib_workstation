@@ -79,4 +79,11 @@ export const api = {
   fileUrl: (type, role, runId, name) =>
     `/api/artifacts/${type}/${role}/${encodeURIComponent(runId)}/files/${encodeURIComponent(name)}`,
   runs: () => request('GET', '/api/runs'),
+
+  cloud: () => request('GET', '/api/cloud'),
+  setCloud: (payload) => request('PUT', '/api/cloud', payload),
+  testCloud: () => request('POST', '/api/cloud/test'),
+  syncCloud: (force = false) => request('POST', `/api/cloud/sync${force ? '?force=true' : ''}`),
+  pushArtifact: (type, role, runId) =>
+    request('POST', `/api/artifacts/${type}/${role}/${encodeURIComponent(runId)}/push`),
 }

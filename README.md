@@ -71,15 +71,24 @@ sudo visudo -c
 
 `manifest.json`（`schema: calib-manifest/1`）：`unit_code / vendor / robot_model / type / camera_role / camera_serial / arm /
 run_id / tool / tool_version / created_at / source_run_dir / quality{num_samples, num_inliers, residual_*} / files[{name, bytes, sha256}] /
-status(draft|active|superseded) / cloud{pushed, pushed_at, remote_id}`。云端 `GET /api/robots/units/{unitCode}/calibrations?type=`
-直接返回这些字段即可；推送器（待做）按 `cloud.pushed=false` 入队。
+status(draft|active|superseded) / cloud{pushed, pushed_at, remote_id, pushed_status, url}`。
+
+### 云端推送
+
+云端平台（Camera-Tools-for-Robot 后端）的地址与 token 在「标定记录」页的「云端同步」卡片里填写，
+保存到 `<data_root>/cloud.json`（0600），不进配置文件。推送单位是一个产物包目录，走云端
+`POST /api/robots/units/{unit_code}/calibrations`（multipart，同 run 重传 = 覆盖，幂等）；成功后回写
+`cloud.pushed / pushed_at / remote_id / pushed_status`。判定：从没推过 = 未推送；`pushed_status != status`
+（之后被设为生效 / 被替代）= 状态待同步；两者都由「立即同步」或归档 / 切换生效后的自动推送（可关）补齐。
+本地删除产物会顺带删云端副本（失败只提示）。
 
 ## 接口
 
 `GET /api/config|health|cameras|plans?camera_role_id=&arm=|calibration|artifacts|artifacts/active|runs`
 `POST /api/cameras/select|detect`
 `POST /api/calibration/prepare|engage|guide|catch|disarm|run|pause|resume|stop|mark-captured|solve|finalize|reset`
-`GET /api/calibration/solve/status`，`POST /api/artifacts/{type}/{role}/{run_id}/activate`，`GET …/files/{name}`
+`GET /api/calibration/solve/status`，`POST /api/artifacts/{type}/{role}/{run_id}/activate|push`，`DELETE …/{run_id}`，`GET …/files/{name}`
+`GET|PUT /api/cloud`，`POST /api/cloud/test|sync?force=`
 
 下游错误统一为 `{ok:false, error, service, status}`：409 表示对方拒绝（可展示原因），502 表示对方不可达。
 

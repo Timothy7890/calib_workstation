@@ -20,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .clients import HttpClient, ServiceError
+from .cloud import CloudError, CloudSettings, CloudSync
 from .config import CAMERA_ROLES, UNIT_CODE_RE, Config, validate_unit_code
 from .manifest import ARTIFACT_TYPES, ArtifactStore
 
@@ -197,6 +198,12 @@ def create_app(config: Config) -> FastAPI:
     replay = HttpClient("回放(18004)", config.replay_url)
     capability = HttpClient("能力中心(18000)", config.capability_url)
     ws = Workspace(config)
+    cloud = CloudSync(CloudSettings(config.data_root / "cloud.json"))
+
+    def auto_push() -> None:
+        """归档 / 切换生效后，若开启自动推送则后台把待同步产物推到云端。"""
+        if cloud.settings.configured and cloud.settings.auto_push and ws.store is not None:
+            cloud.push_pending_async(ws.store)
 
     @app.exception_handler(ServiceError)
     async def _service_error(_request: Request, exc: ServiceError):
@@ -564,8 +571,10 @@ def create_app(config: Config) -> FastAPI:
         if activate:
             for artifact_type in artifacts:
                 artifacts[artifact_type] = store().set_active(artifact_type, data["camera_role"], data["run_id"])
-        return {"ok": True, "job": job().update(step="finalized", finalized=True, activated=activate,
-                                              artifacts={k: v["files"] for k, v in artifacts.items()})}
+        out = {"ok": True, "job": job().update(step="finalized", finalized=True, activated=activate,
+                                             artifacts={k: v["files"] for k, v in artifacts.items()})}
+        auto_push()
+        return out
 
     @app.post("/api/calibration/reset")
     def api_reset():
@@ -667,7 +676,10 @@ def create_app(config: Config) -> FastAPI:
     def api_artifacts(type: str | None = None, camera_role: str | None = None):
         if type and type not in ARTIFACT_TYPES:
             raise fail(422, f"type 只能是 {ARTIFACT_TYPES}")
-        return {"items": store().list(type, camera_role), "root": str(store().root)}
+        items = store().list(type, camera_role)
+        for m in items:
+            m["sync_state"] = cloud.sync_state(m)
+        return {"items": items, "root": str(store().root)}
 
     @app.get("/api/artifacts/active")
     def api_artifacts_active():
@@ -697,6 +709,7 @@ def create_app(config: Config) -> FastAPI:
             for t in ARTIFACT_TYPES:
                 if t != artifact_type and store().get(t, role, run_id) is not None:
                     store().set_active(t, role, run_id)
+        auto_push()
         return result
 
     @app.delete("/api/artifacts/{artifact_type}/{role}/{run_id}")
@@ -711,17 +724,25 @@ def create_app(config: Config) -> FastAPI:
             raise fail(422, "非法 run_id")
         types = list(ARTIFACT_TYPES) if all_types else [artifact_type]
         deleted = []
+        cloud_errors = []
         for t in types:
+            manifest = store().get(t, role, run_id)
             try:
                 deleted.append(store().delete(t, role, run_id))
             except FileNotFoundError:
                 if t == artifact_type:
                     raise fail(404, "产物不存在")
+                continue
+            # 云端上有副本的话一并删掉（尽力而为，失败只提示）
+            err = cloud.delete_remote(store().unit_code, manifest)
+            if err:
+                cloud_errors.append(f"{t}: {err}")
         # 当前任务若正是这次归档，退回"已求解"状态，允许重新归档
         current = job().snapshot()
         if current.get("run_id") == run_id and current.get("camera_role") == role and current.get("finalized"):
             job().update(step="solved", finalized=False, activated=False, artifacts=None)
-        return {"ok": True, "deleted": deleted}
+        return {"ok": True, "deleted": deleted,
+                "cloud_error": "；".join(cloud_errors) if cloud_errors else None}
 
     @app.get("/api/artifacts/{artifact_type}/{role}/{run_id}/files/{name}")
     def api_artifact_file(artifact_type: str, role: str, run_id: str, name: str):
@@ -748,6 +769,60 @@ def create_app(config: Config) -> FastAPI:
                 "finalized": run.get("run_id") in finalized,
             })
         return {"runs": out}
+
+    # ---------------- 云端推送 ----------------
+
+    @app.get("/api/cloud")
+    def api_cloud():
+        """云端设置（token 只回掩码）+ 当前机器人的同步统计 + 最近一次同步结果。"""
+        return cloud.summary(ws.store)
+
+    @app.put("/api/cloud")
+    def api_cloud_set(body: dict):
+        """Body: {url?, token?, auto_push?}。token 传空字符串表示不改。"""
+        try:
+            cloud.settings.update(
+                url=str(body["url"]) if "url" in body else None,
+                token=str(body["token"]) if "token" in body else None,
+                auto_push=bool(body["auto_push"]) if "auto_push" in body else None,
+            )
+        except ValueError as exc:
+            raise fail(422, str(exc)) from exc
+        return {"ok": True, **cloud.summary(ws.store)}
+
+    @app.post("/api/cloud/test")
+    def api_cloud_test():
+        try:
+            health = cloud.client.health()
+        except CloudError as exc:
+            raise fail(502, str(exc)) from exc
+        if not health.get("write_enabled"):
+            raise fail(502, "云端未配置 CALIB_API_TOKEN，不接受上传")
+        return {"ok": True, "health": health}
+
+    @app.post("/api/cloud/sync")
+    def api_cloud_sync(force: bool = False):
+        """把当前机器人所有待同步（未推送 / 状态变过）的产物推到云端；force=true 全部重推。"""
+        result = cloud.push_pending(store(), force=force)
+        return {"ok": bool(result.get("ok")), **result, **cloud.summary(ws.store)}
+
+    @app.post("/api/artifacts/{artifact_type}/{role}/{run_id}/push")
+    def api_artifact_push(artifact_type: str, role: str, run_id: str, all_types: bool = True):
+        """推送一条产物（默认连同同一 run_id 的其他类型一起，保持外参/内参配对）。"""
+        if artifact_type not in ARTIFACT_TYPES:
+            raise fail(422, f"type 只能是 {ARTIFACT_TYPES}")
+        any_role(role)
+        if store().get(artifact_type, role, run_id) is None:
+            raise fail(404, "产物不存在")
+        types = [artifact_type] + [t for t in ARTIFACT_TYPES if all_types and t != artifact_type
+                                   and store().get(t, role, run_id) is not None]
+        pushed = []
+        try:
+            for t in types:
+                pushed.append(cloud.push_one(store(), t, role, run_id))
+        except CloudError as exc:
+            raise fail(502, str(exc)) from exc
+        return {"ok": True, "pushed": pushed}
 
     # ---------------- 前端 ----------------
 
