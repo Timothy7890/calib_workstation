@@ -69,7 +69,10 @@ sudo visudo -c
   <type>/<head|waist>/active.json            # 当前生效指向
 ```
 
-`manifest.json`（`schema: calib-manifest/1`）：`unit_code / vendor / robot_model / type / camera_role / camera_serial / arm /
+`manifest.json` 新产物使用 `schema: calib-manifest/2`，旧的 `calib-manifest/1` 继续兼容读取。v2 在原字段之外增加稳定的
+`artifact_id`、标定对象 `subject`、分区键 `subject_key`、输入关系 `dependencies` 与运行兼容条件 `compatibility`。
+相机产物的 subject 是机器人编号 + 相机位置/序列号；后续 3D 产物的 subject 是机器人编号 + 手臂 + 实体手，避免把
+`T_wrist2hand` 错绑到某个相机位置。其余字段为：`unit_code / vendor / robot_model / type / camera_role / camera_serial / arm /
 run_id / tool / tool_version / created_at / source_run_dir / quality{num_samples, num_inliers, residual_*} / files[{name, bytes, sha256}] /
 status(draft|active|superseded) / cloud{pushed, pushed_at, remote_id, pushed_status, url}`。
 

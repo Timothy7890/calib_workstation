@@ -17,8 +17,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-MANIFEST_SCHEMA = "calib-manifest/1"
-ARTIFACT_TYPES = ("extrinsic", "intrinsic", "camera_transform")
+from .contract import (
+    CAMERA_ARTIFACT_TYPES,
+    MANIFEST_SCHEMA,
+    canonical_subject,
+    normalize_manifest,
+    stable_artifact_id,
+    subject_key,
+)
+
+# The current workstation UI manages camera artifacts.  Hand artifacts use the
+# same v2 contract and are enabled by the 3D integration step.
+ARTIFACT_TYPES = CAMERA_ARTIFACT_TYPES
 
 
 def _sha256(path: Path) -> str:
@@ -103,8 +113,17 @@ class ArtifactStore:
                 "sha256": _sha256(dst),
                 "source": str(src),
             })
+        subject = canonical_subject(
+            artifact_type,
+            unit_code=self.unit_code,
+            camera_role=camera_role,
+            camera_serial=camera_serial,
+            arm=arm,
+        )
         manifest = {
             "schema": MANIFEST_SCHEMA,
+            "artifact_id": stable_artifact_id(
+                self.unit_code, artifact_type, subject, run_id),
             "unit_code": self.unit_code,
             "vendor": self.vendor,
             "robot_model": self.model,
@@ -112,12 +131,16 @@ class ArtifactStore:
             "camera_role": camera_role,
             "camera_serial": camera_serial,
             "arm": arm,
+            "subject": subject,
+            "subject_key": subject_key(artifact_type, subject),
             "run_id": run_id,
             "tool": tool,
             "tool_version": _git_describe(self.tool_projects.get(tool, Path("."))),
             "created_at": _now(),
             "source_run_dir": str(source_run_dir),
             "quality": quality,
+            "dependencies": [],
+            "compatibility": {},
             "files": file_entries,
             "status": "draft",
             "cloud": {"pushed": False, "pushed_at": None, "remote_id": None},
@@ -150,6 +173,20 @@ class ArtifactStore:
             (meta.get("camera") or {}).get("serial")
             or intrinsics.get("serial")
         )
+        intrinsic_subject = canonical_subject(
+            "intrinsic",
+            unit_code=self.unit_code,
+            camera_role=camera_role,
+            camera_serial=camera_serial,
+            arm=arm,
+        )
+        intrinsic_artifact_id = stable_artifact_id(
+            self.unit_code, "intrinsic", intrinsic_subject, run_id)
+        camera_compatibility = {
+            "camera_serial": camera_serial,
+            "width": intrinsics.get("width"),
+            "height": intrinsics.get("height"),
+        }
         n_samples = len(list((run_dir / "joints").glob("*.json"))) if (run_dir / "joints").is_dir() else 0
 
         extrinsic_quality = {
@@ -178,6 +215,13 @@ class ArtifactStore:
                 "primary_file": result_path.name,
                 "T_cam2base": result.get("T_cam2base"),
                 "camera_label": camera_label,
+                "source_method": "checkerboard_2d",
+                "dependencies": ([{
+                    "relation": "solved_with",
+                    "artifact_id": intrinsic_artifact_id,
+                    "type": "intrinsic",
+                }] if intrinsics_path.is_file() else []),
+                "compatibility": camera_compatibility,
             },
             overwrite=overwrite,
         )
@@ -197,7 +241,12 @@ class ArtifactStore:
                     "height": intrinsics.get("height"),
                     "source": intrinsics.get("source"),
                 },
-                extra={"primary_file": intrinsics_path.name, "camera_label": camera_label},
+                extra={
+                    "primary_file": intrinsics_path.name,
+                    "camera_label": camera_label,
+                    "source_method": str(intrinsics.get("source") or "camera_sdk"),
+                    "compatibility": camera_compatibility,
+                },
                 overwrite=overwrite,
             )
         return artifacts
@@ -256,13 +305,24 @@ class ArtifactStore:
         pointer = _read_json(self.active_pointer(artifact_type, camera_role))
         if not pointer or not pointer.get("run_id"):
             return None
-        return _read_json(self.artifact_dir(artifact_type, camera_role, pointer["run_id"]) / "manifest.json")
+        manifest = _read_json(
+            self.artifact_dir(artifact_type, camera_role, pointer["run_id"]) / "manifest.json")
+        if manifest is None:
+            return None
+        try:
+            return normalize_manifest(manifest)
+        except ValueError:
+            return None
 
     def list(self, artifact_type: str | None = None, camera_role: str | None = None) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         for manifest_path in self.root.glob("*/*/*/manifest.json"):
             manifest = _read_json(manifest_path)
             if manifest is None:
+                continue
+            try:
+                manifest = normalize_manifest(manifest)
+            except ValueError:
                 continue
             if artifact_type and manifest.get("type") != artifact_type:
                 continue
@@ -276,5 +336,9 @@ class ArtifactStore:
     def get(self, artifact_type: str, camera_role: str, run_id: str) -> dict[str, Any] | None:
         manifest = _read_json(self.artifact_dir(artifact_type, camera_role, run_id) / "manifest.json")
         if manifest is not None:
+            try:
+                manifest = normalize_manifest(manifest)
+            except ValueError:
+                return None
             manifest["path"] = str(self.artifact_dir(artifact_type, camera_role, run_id))
         return manifest
