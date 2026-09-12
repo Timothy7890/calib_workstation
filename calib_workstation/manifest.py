@@ -1,9 +1,11 @@
-"""标定产物包：<calibrations_root>/<type>/<camera_role>/<run_id>/manifest.json + 文件。
+"""统一标定产物包：<calibrations_root>/<type>/<subject_key>/<run_id>/manifest.json + 文件。
 
-与云端平台（Camera-Tools-for-Robot）的三个栏目一一对应：
+与云端平台（Camera-Tools-for-Robot）的五个栏目一一对应：
   extrinsic        外参：T_cam2base（camera → torso_link），来自 8131 handeye_result_left.json
   intrinsic        内参：Orbbec SDK 读出的 camera_intrinsics.json
   camera_transform 内部相机转换（RGB-D depth→color），2D 流程不产出
+  hand_mount      手安装：T_wrist2hand，来自 8132 mount_result.json
+  tcp_profile     TCP 点集：从 hand_mount 解算结果独立派生
 manifest.json 是机器人侧与云端的唯一契约；字段只加不改。
 """
 
@@ -13,6 +15,7 @@ import hashlib
 import json
 import shutil
 import subprocess
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -253,6 +256,109 @@ class ArtifactStore:
                 overwrite=overwrite,
             )
         return artifacts
+
+    def finalize_3d_mount(
+        self,
+        *,
+        result_path: Path,
+        result: dict[str, Any],
+        run_id: str,
+        arm: str,
+        hand_id: str,
+        hand_serial: str | None = None,
+        extrinsic_artifact_id: str | None = None,
+        tcp_point_id: str | None = None,
+        overwrite: bool = False,
+    ) -> dict[str, dict[str, Any]]:
+        """Archive an 8132 mount solve as independent mount and TCP artifacts."""
+        if not result_path.is_file() or result_path.name != "mount_result.json":
+            raise FileNotFoundError(f"安装标定结果不存在: {result_path}")
+        if result.get("T_wrist2hand") is None:
+            raise ValueError("mount_result.json 缺少 T_wrist2hand")
+        tcp_points = result.get("tcp_points_wrist_m")
+        if not isinstance(tcp_points, list) or not tcp_points:
+            raise ValueError("mount_result.json 缺少 tcp_points_wrist_m")
+        subject_partition = subject_key("hand_mount", canonical_subject(
+            "hand_mount", unit_code=self.unit_code, arm=arm, hand_id=hand_id,
+            hand_serial=hand_serial))
+        dependency = ([{
+            "relation": "solved_with",
+            "artifact_id": extrinsic_artifact_id,
+            "type": "extrinsic",
+        }] if extrinsic_artifact_id else [])
+        compatibility = {
+            "arm": arm,
+            "hand_id": hand_id,
+            "hand_serial": hand_serial,
+            "camera_serial": (result.get("calib_camera") or {}).get("serial"),
+        }
+        mount = self._write_artifact(
+            artifact_type="hand_mount",
+            camera_role=subject_partition,
+            run_id=run_id,
+            files=[result_path],
+            arm=arm,
+            camera_serial=None,
+            hand_id=hand_id,
+            hand_serial=hand_serial,
+            tool="hand_eye_3D",
+            source_run_dir=result_path.parent,
+            quality={
+                "num_samples": result.get("num_samples") or len(result.get("sample_indices") or []),
+                "point_count": result.get("point_count") or len(tcp_points),
+                "pose_count": result.get("pose_count"),
+                "residual_mm": result.get("residual_mm"),
+            },
+            extra={
+                "primary_file": result_path.name,
+                "source_method": str(result.get("mode") or "hand_mount_3d"),
+                "frames": {"parent": result.get("wrist_link"),
+                           "child": result.get("hand_base_link")},
+                "dependencies": dependency,
+                "compatibility": compatibility,
+            },
+            overwrite=overwrite,
+        )
+        with tempfile.TemporaryDirectory(prefix="calib-tcp-") as temporary:
+            tcp_path = Path(temporary) / "tcp_profile.json"
+            tcp_payload = {
+                "schema": "tcp-profile/1",
+                "arm": arm,
+                "hand_id": hand_id,
+                "hand_serial": hand_serial,
+                "source_mount_artifact_id": mount["artifact_id"],
+                "default_tcp_point_id": tcp_point_id,
+                "tcp_points_wrist_m": tcp_points,
+            }
+            tcp_path.write_text(
+                json.dumps(tcp_payload, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            tcp = self._write_artifact(
+                artifact_type="tcp_profile",
+                camera_role=subject_partition,
+                run_id=run_id,
+                files=[tcp_path],
+                arm=arm,
+                camera_serial=None,
+                hand_id=hand_id,
+                hand_serial=hand_serial,
+                tool="hand_eye_3D",
+                source_run_dir=result_path.parent,
+                quality={"point_count": len(tcp_points)},
+                extra={
+                    "primary_file": tcp_path.name,
+                    "source_method": "derived_from_hand_mount",
+                    "dependencies": [{
+                        "relation": "derived_from",
+                        "artifact_id": mount["artifact_id"],
+                        "type": "hand_mount",
+                    }],
+                    "compatibility": compatibility,
+                },
+                overwrite=overwrite,
+            )
+        return {"hand_mount": mount, "tcp_profile": tcp}
 
     # ---------- 生效 / 列表 ----------
 

@@ -8,6 +8,7 @@ services:
   hand_eye_2d: http://127.0.0.1:8131      # 2D 相机 + 采集 + 求解
   replay: http://127.0.0.1:18004          # 轨迹回放（人工监护）
   hand_eye_3d: http://127.0.0.1:8132      # 3D 采集/求解（start.sh --3d 时拉起）
+  hand_eye_3d_ui: http://127.0.0.1:7013   # 3D 点云/手安装操作台（嵌入工作站）
   capability: http://127.0.0.1:18000      # 能力中心
 
 # 产物根目录；实际落 <data_root>/<unit_code>/calibrations/<type>/<camera_role>/<run_id>/

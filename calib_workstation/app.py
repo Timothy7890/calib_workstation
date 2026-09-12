@@ -195,6 +195,7 @@ def create_app(config: Config) -> FastAPI:
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
     he2d = HttpClient("hand_eye_2D(8131)", config.hand_eye_2d_url)
+    he3d = HttpClient("hand_eye_3D(8132)", config.hand_eye_3d_url, timeout_s=120.0)
     replay = HttpClient("回放(18004)", config.replay_url)
     capability = HttpClient("能力中心(18000)", config.capability_url)
     ws = Workspace(config)
@@ -292,9 +293,11 @@ def create_app(config: Config) -> FastAPI:
     def api_health():
         out: dict[str, Any] = {"ok": True, "services": {}}
         ok2d, err2d = he2d.reachable("/api/status")
+        ok3d, err3d = he3d.reachable("/api/status")
         okr, errr = replay.reachable("/api/status")
         okc, errc = capability.reachable("/api/capability/registry")
         out["services"]["hand_eye_2d"] = {"ok": ok2d, "error": err2d}
+        out["services"]["hand_eye_3d"] = {"ok": ok3d, "error": err3d, "optional": True}
         out["services"]["replay"] = {"ok": okr, "error": errr}
         out["services"]["capability"] = {"ok": okc, "error": errc}
         if ok2d:
@@ -317,6 +320,145 @@ def create_app(config: Config) -> FastAPI:
                              "engaged": (rs.get("arm") or {}).get("engaged")}
         out["ok"] = out["ok"] and ok2d and okr
         return out
+
+    # ---------------- 3D 手安装 / TCP ----------------
+
+    def capability_registry() -> dict[str, Any]:
+        payload = capability.get("/api/capability/registry")
+        registry = payload.get("registry")
+        if not isinstance(registry, dict):
+            raise fail(502, "18000 返回缺少 registry")
+        return registry
+
+    def active_camera_manifest(artifact_type: str, role: str) -> dict[str, Any] | None:
+        manifest = store().active(artifact_type, role)
+        if manifest is None:
+            return None
+        manifest["path"] = str(store().artifact_dir(artifact_type, role, manifest["run_id"]))
+        return manifest
+
+    @app.get("/api/hand-calibration")
+    def api_hand_calibration(request: Request):
+        registry = capability_registry()
+        active = registry.get("active") or {}
+        role = str(active.get("camera_role") or "head")
+        ok3d, error3d = he3d.reachable("/api/status")
+        mount = None
+        if ok3d:
+            mount = he3d.get("/api/mount/result")
+        current = {
+            artifact_type: active_camera_manifest(artifact_type, role)
+            for artifact_type in ("extrinsic", "intrinsic", "camera_transform")
+        }
+        return {
+            "ok": True,
+            "service": {"ok": ok3d, "error": error3d},
+            "active": active,
+            "hands": registry.get("hands") or [],
+            "camera_role": role,
+            "camera_artifacts": current,
+            "mount": mount,
+            "ui_url": _public_url(config.hand_eye_3d_ui_url, request),
+        }
+
+    @app.post("/api/hand-calibration/solve")
+    def api_hand_calibration_solve(body: dict):
+        registry = capability_registry()
+        active = registry.get("active") or {}
+        role = str(body.get("camera_role") or active.get("camera_role") or "head")
+        camera_role(role)
+        extrinsic = active_camera_manifest("extrinsic", role)
+        if extrinsic is None:
+            raise fail(409, f"{role_label(role)}还没有生效的 2D 外参")
+        calib_path = Path(extrinsic["path"]) / str(extrinsic.get("primary_file") or "handeye_result_left.json")
+        return he3d.post("/api/mount/solve", {"calib_path": str(calib_path)}, timeout_s=180.0)
+
+    @app.post("/api/hand-calibration/finalize")
+    def api_hand_calibration_finalize(body: dict):
+        run_id = str(body.get("run_id") or "").strip()
+        if not _RUN_NAME_RE.match(run_id):
+            raise fail(422, "运行名不能为空，只能含 Unicode 字母/数字及 . _ -，且不能以 . 开头")
+        registry = capability_registry()
+        active = registry.get("active") or {}
+        arm = str(active.get("arm") or "")
+        hand_id = str(active.get("hand_id") or "")
+        if arm not in ("left_arm", "right_arm") or not hand_id:
+            raise fail(409, "18000 尚未选择有效的激活臂和手型号")
+        role = str(body.get("camera_role") or active.get("camera_role") or "head")
+        camera_role(role)
+        extrinsic = active_camera_manifest("extrinsic", role)
+        if extrinsic is None:
+            raise fail(409, f"{role_label(role)}还没有生效的 2D 外参")
+        mount_payload = he3d.get("/api/mount/result")
+        result = mount_payload.get("result")
+        if not isinstance(result, dict):
+            raise fail(409, "8132 还没有安装标定结果，请先标注并解算")
+        if mount_payload.get("stale"):
+            raise fail(409, "安装标定结果已过期：样本在解算后发生变化，请重新解算")
+        result_arm = str(result.get("arm") or "").replace("_arm", "")
+        if result_arm and f"{result_arm}_arm" != arm:
+            raise fail(409, f"8132 结果属于 {result.get('arm')}，18000 当前激活的是 {arm}")
+        result_hand = str(result.get("hand_id") or "")
+        if result_hand and result_hand != hand_id:
+            raise fail(409, f"8132 结果属于手 {result_hand}，18000 当前激活的是 {hand_id}")
+        result_path = Path(str(result.get("saved_to") or ""))
+        hand = next((item for item in registry.get("hands") or []
+                     if item.get("id") == hand_id), {})
+        try:
+            artifacts = store().finalize_3d_mount(
+                result_path=result_path,
+                result=result,
+                run_id=run_id,
+                arm=arm,
+                hand_id=hand_id,
+                hand_serial=str(body.get("hand_serial") or "").strip() or None,
+                extrinsic_artifact_id=extrinsic.get("artifact_id"),
+                tcp_point_id=str(body.get("tcp_point_id") or hand.get("tcp_point_id") or "") or None,
+                overwrite=bool(body.get("overwrite", False)),
+            )
+        except (FileNotFoundError, FileExistsError, ValueError) as exc:
+            raise fail(409, str(exc)) from exc
+        subject_partition = artifacts["hand_mount"]["subject_key"]
+        for artifact_type in ("hand_mount", "tcp_profile"):
+            store().set_active(artifact_type, subject_partition, run_id)
+
+        cloud_error = None
+        if cloud.settings.configured and cloud.settings.auto_push:
+            try:
+                for artifact_type in ("hand_mount", "tcp_profile"):
+                    cloud.push_one(store(), artifact_type, subject_partition, run_id)
+            except CloudError as exc:
+                cloud_error = str(exc)
+
+        selected: dict[str, dict[str, Any]] = {}
+        for artifact_type in ("extrinsic", "intrinsic", "camera_transform"):
+            manifest = active_camera_manifest(artifact_type, role)
+            if manifest is not None:
+                selected[artifact_type] = manifest
+        for artifact_type in ("hand_mount", "tcp_profile"):
+            manifest = store().get(artifact_type, subject_partition, run_id)
+            if manifest is not None:
+                selected[artifact_type] = manifest
+        for manifest in selected.values():
+            capability.post("/api/capability/calibration-artifacts", {
+                "manifest": manifest,
+                "local_path": manifest.get("path"),
+            })
+        capability.post("/api/capability/calibration-bindings", {
+            "arm": arm,
+            "hand_id": hand_id,
+            "camera_role": role,
+            "artifacts": {kind: manifest["artifact_id"] for kind, manifest in selected.items()},
+        })
+        auto_push()
+        return {
+            "ok": True,
+            "run_id": run_id,
+            "subject_key": subject_partition,
+            "artifacts": selected,
+            "binding": {kind: manifest["artifact_id"] for kind, manifest in selected.items()},
+            "cloud_error": cloud_error,
+        }
 
     # ---------------- 相机 ----------------
 

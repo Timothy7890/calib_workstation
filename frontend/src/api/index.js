@@ -64,6 +64,11 @@ export const api = {
     request('POST', '/api/calibration/role', { camera_role: cameraRole, camera_label: cameraLabel || '' }),
   loadRun: (runId, arm) => request('POST', '/api/calibration/load-run', { run_id: runId, arm }),
 
+  handCalibration: () => request('GET', '/api/hand-calibration'),
+  solveHandCalibration: (cameraRole) =>
+    request('POST', '/api/hand-calibration/solve', { camera_role: cameraRole }),
+  finalizeHandCalibration: (payload) => request('POST', '/api/hand-calibration/finalize', payload),
+
   artifacts: (type, role) => {
     const q = new URLSearchParams()
     if (type) q.set('type', type)

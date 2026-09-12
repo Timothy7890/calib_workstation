@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 标定工作站一键启动：18000 能力中心 → 停推流独占相机 → 8131（2D 采集/求解，只读关节）
-#                     → 18004（轨迹回放）→ 18005（工作站页面）。Ctrl+C 全部退出并恢复推流。
+#                     → 可选 8132 + 7013（3D 手/TCP）→ 18004（轨迹回放）→ 18005（统一页面）。
 #
 #   ./start.sh                  # 真机
 #   ./start.sh --arm left       # 8131 初始读左臂（向导里可按计划切换）
@@ -57,17 +57,17 @@ fi
 echo "[start] Python: $PY"
 
 # ---- 读配置 ----
-read -r DATA_ROOT PORT_WS URL_2D URL_REPLAY URL_3D < <("$PY" - "$CONFIG" <<'EOF'
+read -r DATA_ROOT PORT_WS URL_2D URL_REPLAY URL_3D URL_3D_UI < <("$PY" - "$CONFIG" <<'EOF'
 import sys, yaml, urllib.parse
 c = yaml.safe_load(open(sys.argv[1])) or {}
 s = c.get("services") or {}
 def port(u, d): return urllib.parse.urlparse(u).port or d
 print(c.get("data_root", "./calib_workstation_data"), 18005,
       s.get("hand_eye_2d", "http://127.0.0.1:8131"), s.get("replay", "http://127.0.0.1:18004"),
-      s.get("hand_eye_3d", "http://127.0.0.1:8132"))
+      s.get("hand_eye_3d", "http://127.0.0.1:8132"), s.get("hand_eye_3d_ui", "http://127.0.0.1:7013"))
 EOF
 ) || { echo "[start] 读取配置失败: $CONFIG" >&2; exit 1; }
-PORT_2D="${URL_2D##*:}"; PORT_REPLAY="${URL_REPLAY##*:}"; PORT_3D="${URL_3D##*:}"
+PORT_2D="${URL_2D##*:}"; PORT_REPLAY="${URL_REPLAY##*:}"; PORT_3D="${URL_3D##*:}"; PORT_3D_UI="${URL_3D_UI##*:}"
 echo "[start] 配置 $CONFIG  数据目录 $DATA_ROOT（机器人编号在页面里输入）"
 
 # ---- 端口检查 ----
@@ -77,6 +77,9 @@ for p in "$PORT_2D" "$PORT_WS"; do
 done
 if [ "$WITH_3D" -eq 1 ] && ! port_free "$PORT_3D"; then
   echo "[start] 端口 $PORT_3D 已被占用（hand_eye_3D 已在别处运行？），请先结束旧进程" >&2; exit 1
+fi
+if [ "$WITH_3D" -eq 1 ] && ! port_free "$PORT_3D_UI"; then
+  echo "[start] 端口 $PORT_3D_UI 已被占用（3D 点云操作台已在运行？）" >&2; exit 1
 fi
 if ! port_free "$PORT_REPLAY"; then
   if "$REPLAY_DIR/replay.sh" status | grep -q "运行中"; then
@@ -101,12 +104,13 @@ if [ "$MOCK" -eq 0 ]; then
 fi
 
 # ---- 收尾 ----
-PID_2D=""; PID_3D=""; PID_WS=""; PID_FE=""; CAMERA_LOCKED=0
+PID_2D=""; PID_3D=""; PID_3D_FE=""; PID_WS=""; PID_FE=""; CAMERA_LOCKED=0
 cleanup() {
   trap - INT TERM EXIT
   echo ""; echo "[start] 正在退出…"
   [ -n "$PID_FE" ] && kill "$PID_FE" 2>/dev/null
   [ -n "$PID_WS" ] && kill "$PID_WS" 2>/dev/null
+  [ -n "$PID_3D_FE" ] && kill "$PID_3D_FE" 2>/dev/null
   [ "${REPLAY_OWNED:-0}" -eq 1 ] && "$REPLAY_DIR/replay.sh" stop
   if [ -n "$PID_3D" ] && kill -INT "$PID_3D" 2>/dev/null; then
     for _ in $(seq 1 10); do kill -0 "$PID_3D" 2>/dev/null || break; sleep 0.5; done
@@ -183,6 +187,18 @@ if [ "$WITH_3D" -eq 1 ]; then
       sleep 0.5
     done
     echo "[start] 8132 就绪（3D 采集/求解）"
+    VITE_3D="$HE3D_DIR/frontend/node_modules/.bin/vite"
+    if [ ! -x "$VITE_3D" ] && command -v npm >/dev/null 2>&1; then
+      echo "[start] 正在安装 3D 操作台前端依赖…"
+      (cd "$HE3D_DIR/frontend" && npm install --silent) || { echo "[start] 3D 前端依赖安装失败" >&2; exit 1; }
+    fi
+    if [ -x "$VITE_3D" ]; then
+      (cd "$HE3D_DIR/frontend" && exec "$VITE_3D" --config vite.pointcloud.config.js --port "$PORT_3D_UI") >>"$LOG_DIR/hand_eye_3d_ui.log" 2>&1 &
+      PID_3D_FE=$!
+      echo "[start] 3D 点云/手安装操作台就绪（$URL_3D_UI，将嵌入 18005）"
+    else
+      echo "[start] 未找到 3D 前端 Vite，18005 可归档但不能嵌入操作台" >&2
+    fi
   fi
 fi
 

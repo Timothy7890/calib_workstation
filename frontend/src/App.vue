@@ -35,6 +35,7 @@ onUnmounted(() => clearInterval(timer))
       <nav class="nav">
         <RouterLink :to="{ name: 'home' }" class="nav-link" exact-active-class="is-active">总览</RouterLink>
         <RouterLink :to="{ name: 'calibrate' }" class="nav-link" active-class="is-active">开始标定</RouterLink>
+        <RouterLink :to="{ name: 'hand-calibration' }" class="nav-link" active-class="is-active">3D 手/TCP</RouterLink>
         <RouterLink :to="{ name: 'history' }" class="nav-link" active-class="is-active">标定记录</RouterLink>
         <RouterLink :to="{ name: 'plans' }" class="nav-link" active-class="is-active">采集计划</RouterLink>
         <RouterLink :to="{ name: 'guide' }" class="nav-link" active-class="is-active">使用说明</RouterLink>
@@ -46,6 +47,7 @@ onUnmounted(() => clearInterval(timer))
         <span v-if="health" class="dot" :class="health.ok ? 'ok' : 'bad'" :title="health.error || ''"></span>
         <span v-if="health" class="svc">
           <span :class="health.services.hand_eye_2d?.ok ? 'ok' : 'bad'">相机</span>
+          <span :class="health.services.hand_eye_3d?.ok ? 'ok' : 'idle'">3D</span>
           <span :class="health.services.replay?.ok ? 'ok' : 'bad'">回放</span>
           <span :class="health.services.capability?.ok ? 'ok' : 'bad'">能力中心</span>
         </span>
@@ -200,6 +202,10 @@ onUnmounted(() => clearInterval(timer))
 .svc span.bad {
   color: #b23b3b;
   background: #fbe9e9;
+}
+
+.svc span.idle {
+  color: #777;
 }
 
 .content {
