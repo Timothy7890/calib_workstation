@@ -27,8 +27,8 @@ from .manifest import ARTIFACT_TYPES, ArtifactStore
 ARMS = ("left", "right")
 # 运行名：允许中文等 Unicode 字母/数字、. _ -；不能有空格、斜杠，不能以 . 开头（与 18004/8131 一致）
 _RUN_NAME_RE = re.compile(r"^[^\W.][\w.-]{0,63}$")
-# 自定义相机位置 id（目录名）：小写字母/数字/下划线/连字符
-_ROLE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+# 相机位置或手部 subject_key（目录名）：小写字母/数字/下划线/连字符
+_ROLE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,127}$")
 _FRONTEND_DIST = Path(__file__).resolve().parents[1] / "frontend" / "dist"
 _CALIB_ROOT = Path(__file__).resolve().parents[2]
 
@@ -229,10 +229,10 @@ def create_app(config: Config) -> FastAPI:
         return config.cameras[role]
 
     def any_role(role: str) -> str:
-        """产物操作允许的相机位置：配置里的 head/waist，或已归档 / 自定义的合法 id。"""
+        """校验相机位置或手部产物的 subject_key。"""
         if role in config.cameras or _ROLE_ID_RE.match(role or ""):
             return role
-        raise fail(422, f"非法相机位置 {role!r}")
+        raise fail(422, f"非法标定对象键 {role!r}")
 
     def role_label(role: str, label: str | None = None) -> str:
         if role in config.cameras:
@@ -685,8 +685,11 @@ def create_app(config: Config) -> FastAPI:
     def api_artifacts_active():
         out: dict[str, Any] = {}
         for artifact_type in ARTIFACT_TYPES:
-            roles = [r for r in CAMERA_ROLES if r in config.cameras] + [r for r in store().roles() if r not in config.cameras]
-            out[artifact_type] = {role: store().active(artifact_type, role) for role in roles}
+            configured = ([r for r in CAMERA_ROLES if r in config.cameras]
+                          if artifact_type in ("extrinsic", "intrinsic", "camera_transform") else [])
+            keys = configured + [key for key in store().subject_keys(artifact_type)
+                                 if key not in configured]
+            out[artifact_type] = {key: store().active(artifact_type, key) for key in keys}
         return out
 
     @app.get("/api/artifacts/{artifact_type}/{role}/{run_id}")

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from .contract import (
+    ARTIFACT_TYPES as CONTRACT_ARTIFACT_TYPES,
     CAMERA_ARTIFACT_TYPES,
     MANIFEST_SCHEMA,
     canonical_subject,
@@ -26,9 +27,7 @@ from .contract import (
     subject_key,
 )
 
-# The current workstation UI manages camera artifacts.  Hand artifacts use the
-# same v2 contract and are enabled by the 3D integration step.
-ARTIFACT_TYPES = CAMERA_ARTIFACT_TYPES
+ARTIFACT_TYPES = CONTRACT_ARTIFACT_TYPES
 
 
 def _sha256(path: Path) -> str:
@@ -91,6 +90,8 @@ class ArtifactStore:
         files: list[Path],
         arm: str,
         camera_serial: str | None,
+        hand_id: str | None = None,
+        hand_serial: str | None = None,
         tool: str,
         source_run_dir: Path,
         quality: dict[str, Any],
@@ -119,6 +120,8 @@ class ArtifactStore:
             camera_role=camera_role,
             camera_serial=camera_serial,
             arm=arm,
+            hand_id=hand_id,
+            hand_serial=hand_serial,
         )
         manifest = {
             "schema": MANIFEST_SCHEMA,
@@ -292,13 +295,21 @@ class ArtifactStore:
         shutil.rmtree(target)
         return {"type": artifact_type, "camera_role": camera_role, "run_id": run_id, "was_active": was_active}
 
+    def subject_keys(self, artifact_type: str | None = None) -> list[str]:
+        """Return archived subject partitions, optionally for one type."""
+        found: set[str] = set()
+        artifact_types = (artifact_type,) if artifact_type else ARTIFACT_TYPES
+        for current_type in artifact_types:
+            base = self.root / current_type
+            if base.is_dir():
+                found.update(p.name for p in base.iterdir() if p.is_dir())
+        return sorted(found)
+
     def roles(self) -> list[str]:
         """已归档过的所有相机位置 id（含自定义），按目录名去重。"""
         found: set[str] = set()
-        for artifact_type in ARTIFACT_TYPES:
-            base = self.root / artifact_type
-            if base.is_dir():
-                found.update(p.name for p in base.iterdir() if p.is_dir())
+        for artifact_type in CAMERA_ARTIFACT_TYPES:
+            found.update(self.subject_keys(artifact_type))
         return sorted(found)
 
     def active(self, artifact_type: str, camera_role: str) -> dict[str, Any] | None:

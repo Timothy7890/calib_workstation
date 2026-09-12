@@ -156,7 +156,13 @@ async function openRun(r) {
 
 onMounted(load)
 
-const TYPE_LABEL = { extrinsic: '外参', intrinsic: '内参（SDK）', camera_transform: '内部相机转换' }
+const TYPE_LABEL = {
+  extrinsic: '外参',
+  intrinsic: '内参（SDK）',
+  camera_transform: '内部相机转换',
+  hand_mount: '灵巧手安装',
+  tcp_profile: 'TCP 配置',
+}
 const TARGET_LABEL = { hand_eye_2D_head: '2D 头部', hand_eye_2D_waist: '2D 腰部' }
 const OUTCOME = { completed: '完成', stopped: '已停止', fault: '故障' }
 

@@ -66,6 +66,8 @@ sudo visudo -c
 <data_root>/<unit_code>/calibrations/
   extrinsic/<head|waist>/<run_id>/manifest.json + handeye_result_left.json + session_meta.json + run.json
   intrinsic/<head|waist>/<run_id>/manifest.json + camera_intrinsics.json
+  hand_mount/<arm>__<hand_id>/<run_id>/manifest.json + mount_result.json
+  tcp_profile/<arm>__<hand_id>/<run_id>/manifest.json + tcp_profile.json
   <type>/<head|waist>/active.json            # 当前生效指向
 ```
 
