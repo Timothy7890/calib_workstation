@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 from datetime import datetime
@@ -31,6 +32,7 @@ _RUN_NAME_RE = re.compile(r"^[^\W.][\w.-]{0,63}$")
 _ROLE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,127}$")
 _FRONTEND_DIST = Path(__file__).resolve().parents[1] / "frontend" / "dist"
 _CALIB_ROOT = Path(__file__).resolve().parents[2]
+logger = logging.getLogger(__name__)
 
 
 class Job:
@@ -214,6 +216,26 @@ def create_app(config: Config) -> FastAPI:
     def fail(status: int, message: str) -> HTTPException:
         return HTTPException(status, {"ok": False, "error": message, "message": message})
 
+    def register_capability_robot(unit_code: str) -> None:
+        capability.post("/api/capability/robot", {
+            "unit_code": unit_code,
+            "vendor": config.vendor,
+            "model": config.model,
+        })
+
+    def register_saved_robot() -> None:
+        """Reconcile persisted workstation identity after an upgrade/restart."""
+        if not ws.unit_code:
+            return
+        try:
+            register_capability_robot(ws.unit_code)
+        except ServiceError as exc:
+            # 18000 may still be starting. Any 3D request retries this and
+            # surfaces the error, so startup remains available for 2D work.
+            logger.warning("未能向 18000 登记已保存的机器人 %s: %s", ws.unit_code, exc)
+
+    app.add_event_handler("startup", register_saved_robot)
+
     def store() -> ArtifactStore:
         if ws.store is None:
             raise fail(409, "还没有设置机器人编号，请先在页面输入")
@@ -263,7 +285,9 @@ def create_app(config: Config) -> FastAPI:
     @app.put("/api/robot")
     def api_robot_set(body: dict):
         try:
-            ws.select(str(body.get("unit_code") or ""))
+            unit_code = validate_unit_code(str(body.get("unit_code") or ""))
+            register_capability_robot(unit_code)
+            ws.select(unit_code)
         except ValueError as exc:
             raise fail(409 if "正在进行" in str(exc) else 422, str(exc)) from exc
         return {"ok": True, **ws.info()}
@@ -324,6 +348,8 @@ def create_app(config: Config) -> FastAPI:
     # ---------------- 3D 手安装 / TCP ----------------
 
     def capability_registry() -> dict[str, Any]:
+        if ws.unit_code:
+            register_capability_robot(ws.unit_code)
         payload = capability.get("/api/capability/registry")
         registry = payload.get("registry")
         if not isinstance(registry, dict):
