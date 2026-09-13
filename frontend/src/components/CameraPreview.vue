@@ -1,5 +1,5 @@
 <script setup>
-// 18005 /ws/stream 实时图像（左目，带角点叠加）。
+// 18005 /ws/stream 实时图像。统一工作站发送二进制 JPEG，同时兼容旧服务的 JSON/Base64。
 import { onMounted, onUnmounted, ref, watch } from 'vue'
 
 const props = defineProps({
@@ -13,12 +13,23 @@ const connected = ref(false)
 const count = ref(0)
 let ws = null
 let retry = null
+let objectUrl = ''
+
+function showBinaryFrame(data) {
+  const blob = data instanceof Blob ? data : new Blob([data], { type: 'image/jpeg' })
+  const nextUrl = URL.createObjectURL(blob)
+  const previousUrl = objectUrl
+  objectUrl = nextUrl
+  src.value = nextUrl
+  if (previousUrl) URL.revokeObjectURL(previousUrl)
+}
 
 function connect() {
   close()
   if (!props.url) return
   try {
     ws = new WebSocket(props.url)
+    ws.binaryType = 'arraybuffer'
   } catch {
     scheduleRetry()
     return
@@ -28,6 +39,10 @@ function connect() {
     if (props.boardSize) ws.send(JSON.stringify({ board_size: props.boardSize, show_corners: true }))
   }
   ws.onmessage = (ev) => {
+    if (typeof ev.data !== 'string') {
+      showBinaryFrame(ev.data)
+      return
+    }
     try {
       const d = JSON.parse(ev.data)
       if (d.left) src.value = 'data:image/jpeg;base64,' + d.left
@@ -58,6 +73,11 @@ function close() {
     ws.close()
     ws = null
   }
+  if (objectUrl) {
+    URL.revokeObjectURL(objectUrl)
+    objectUrl = ''
+  }
+  src.value = ''
 }
 
 watch(() => props.url, connect)
