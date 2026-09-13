@@ -34,7 +34,7 @@ onUnmounted(() => clearInterval(timer))
       </RouterLink>
       <nav class="nav">
         <RouterLink :to="{ name: 'home' }" class="nav-link" exact-active-class="is-active">总览</RouterLink>
-        <RouterLink :to="{ name: 'calibrate' }" class="nav-link" active-class="is-active">开始标定</RouterLink>
+        <RouterLink :to="{ name: 'calibrate' }" class="nav-link" active-class="is-active">手眼标定</RouterLink>
         <RouterLink :to="{ name: 'hand-calibration' }" class="nav-link" active-class="is-active">3D 手/TCP</RouterLink>
         <RouterLink :to="{ name: 'history' }" class="nav-link" active-class="is-active">标定记录</RouterLink>
         <RouterLink :to="{ name: 'plans' }" class="nav-link" active-class="is-active">采集计划</RouterLink>
