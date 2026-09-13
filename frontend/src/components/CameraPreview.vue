@@ -95,10 +95,6 @@ defineExpose({ detected, connected })
       <span v-else-if="!connected">正在连接相机画面…</span>
       <span v-else>等待相机帧（相机未连接或未选择）</span>
     </div>
-    <div class="overlay">
-      <span class="tag" :class="detected ? 'ok' : 'warn'">{{ detected ? '已检出棋盘格' : '未检出棋盘格' }}</span>
-      <span class="tag">{{ connected ? '画面在线' : '画面离线' }}</span>
-    </div>
   </div>
 </template>
 
@@ -106,7 +102,7 @@ defineExpose({ detected, connected })
 .preview {
   position: relative;
   width: 100%;
-  aspect-ratio: 4 / 3;
+  aspect-ratio: 16 / 9;
   background: #111;
   border-radius: 6px;
   overflow: hidden;
@@ -129,11 +125,4 @@ defineExpose({ detected, connected })
   font-size: 13px;
 }
 
-.overlay {
-  position: absolute;
-  left: 10px;
-  bottom: 10px;
-  display: flex;
-  gap: 8px;
-}
 </style>
