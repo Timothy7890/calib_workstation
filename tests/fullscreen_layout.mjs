@@ -11,6 +11,8 @@ try {
     const page = await browser.newPage({ viewport: { width, height } })
     let restoreCalls = 0
     let objectCalls = 0
+    let finishCalls = 0
+    let pointsReady = false
     const alreadyConfirmed = width !== 800
     const job = { calibration_kind: '3d', step: 'annotating', arm: 'left', camera_role: 'head',
       run_dir: '/mock/capture', object_mode: alreadyConfirmed ? 'hand' : null, model_id: 'qiangnao-revo2-left' }
@@ -23,7 +25,12 @@ try {
       if (path === '/api/health') return reply({ ok: true, services: {} })
       if (path === '/api/hand-calibration') return reply({ job, ui_url: '/mock-viewer/', service: { ok: true },
         replay: { state: 'completed', arm: { arm: 'left', engaged: true } }, active: { arm: 'left_arm' },
-        episodes: [], tasks: [], annotation: {} })
+        episodes: [], tasks: [], annotation: { usable_point_count: pointsReady ? 20 : 0, min_points: 3 } })
+      if (path === '/api/hand-calibration/annotation-complete') {
+        assert.equal(route.request().method(), 'POST')
+        finishCalls += 1; job.step = 'annotated'; return reply({ ok: true, job })
+      }
+      if (path === '/api/hand-calibration/solve') throw new Error('Finishing annotation must not solve or overwrite results')
       if (path === '/api/hand-calibration/object') { objectCalls += 1; job.object_mode = 'hand'; return reply({ ok: true, job }) }
       if (path === '/api/hand-calibration/annotation-session') { restoreCalls += 1; return reply({ ok: true, job }) }
       if (path === '/three-d/api/hands') return reply({ hands: [{ hand_id: job.model_id, label: '强脑-Revo2-左', side: 'left' }] })
@@ -38,7 +45,10 @@ try {
     await page.getByRole('button', { name: '确认对象', exact: true }).waitFor()
     assert.equal(await page.getByRole('button', { name: '全屏选点', exact: true }).count(), 0)
     assert.equal(await page.locator('.annotation-card iframe').count(), 0, 'No inline viewer before confirmation')
-    assert.equal(await page.locator('.annotation-actions').count(), 0, 'No inline viewer footer')
+    const next = page.getByRole('button', { name: '选点完成，进入求解', exact: true })
+    assert.ok(await next.isVisible(), 'Next step must remain accessible outside fullscreen')
+    assert.ok(await next.isDisabled(), 'Insufficient points must still block continuation')
+    pointsReady = true
     assert.equal(restoreCalls, 0, 'Do not restore an annotation session before confirmation')
     if (!alreadyConfirmed) await page.getByLabel('几何模型').selectOption(job.model_id)
     await page.getByRole('button', { name: '确认对象', exact: true }).click()
@@ -60,7 +70,8 @@ try {
     await page.getByRole('button', { name: '退出全屏', exact: true }).click()
     assert.equal(await page.locator('.annotation-fullscreen').count(), 0)
     assert.equal(await page.locator('.annotation-card iframe').isVisible(), false, 'No small viewer after exiting fullscreen')
-    assert.equal(await page.locator('.annotation-actions').count(), 0)
+    assert.ok(await next.isVisible())
+    assert.ok(await next.isEnabled())
     await page.getByRole('button', { name: '确认对象', exact: true }).click()
     await page.locator('.annotation-fullscreen').waitFor()
     assert.ok((await page.locator('.annotation-card iframe').boundingBox()).height > height * 0.55)
@@ -69,6 +80,10 @@ try {
     assert.equal(objectCalls, alreadyConfirmed ? 0 : 1, 'Reconfirming the same object must not reset the calibration job')
     console.log(`${width}x${height}: iframe ${Math.round(frame.width)}x${Math.round(frame.height)}, footer visible`)
     if (process.env.LAYOUT_SCREENSHOT && width === 1920) await page.screenshot({ path: process.env.LAYOUT_SCREENSHOT })
+    await page.getByRole('button', { name: '退出全屏', exact: true }).click()
+    await next.click()
+    await page.getByRole('button', { name: '开始求解', exact: true }).waitFor()
+    assert.equal(finishCalls, 1, 'Normal view must advance without reopening the viewer or solving')
     await page.close()
   }
 } finally {

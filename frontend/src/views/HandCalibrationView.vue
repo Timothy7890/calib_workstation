@@ -489,7 +489,7 @@ onUnmounted(() => clearInterval(timer))
             </div>
             <ToolPointPicker v-if="annotationSessionReady && generic" v-show="fullscreen" :job="job" :episodes="episodes" @updated="pointsUpdated" />
             <iframe v-else-if="annotationSessionReady && job.model_id" v-show="fullscreen" :key="iframeKey" :src="`${state?.ui_url || '/three-d-ui/'}?embedded=annotation&model_id=${encodeURIComponent(job.model_id)}`" title="3D点云手动选点操作台"></iframe>
-            <div v-if="fullscreen" class="actions annotation-actions">
+            <div class="actions annotation-actions">
               <button class="btn ghost" :disabled="!!busy" @click="iframeKey += 1; refresh({ keepStep: true })">刷新选点进度</button>
               <button class="btn lg" :disabled="!!busy || !annotationReady" @click="finishAnnotation">选点完成，进入求解</button>
             </div>
