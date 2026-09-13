@@ -92,11 +92,11 @@ onMounted(refresh)
       本地归档及 18000 绑定成功，但云端同步失败：{{ publishResult.cloud_error }}。可在“标定记录”中重试。
     </div>
     <div v-if="state && !state.service.ok" class="alert warn page-message">
-      8132 未运行：{{ state.service.error }}。请使用 <span class="mono">./start.sh --3d</span> 启动完整工作站。
+      内置3D引擎未就绪：{{ state.service.error }}
     </div>
 
     <div class="workspace">
-      <iframe v-if="state?.service.ok && state?.ui_url" :src="state.ui_url" title="3D 点云与手安装标定操作台"></iframe>
+      <iframe v-if="state?.service.ok && state?.ui_url" :src="state.ui_url" title="18005 内置3D点云与手安装标定操作台"></iframe>
       <div v-else class="empty">3D 操作台未就绪</div>
 
       <aside>

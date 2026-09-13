@@ -512,7 +512,7 @@ def create_app(config: Config) -> FastAPI:
             "camera_role": role,
             "camera_artifacts": current,
             "mount": mount,
-            "ui_url": str(request.base_url).rstrip("/") + "/three-d/",
+            "ui_url": "/three-d-ui/",
         }
 
     @app.post("/api/hand-calibration/solve")
@@ -1133,6 +1133,14 @@ def create_app(config: Config) -> FastAPI:
     app.mount("/three-d", calib3d_app.app, name="calib3d")
 
     # ---------------- 前端 ----------------
+
+    calib3d_frontend = _FRONTEND_DIST / "three-d-ui"
+    if calib3d_frontend.is_dir():
+        app.mount(
+            "/three-d-ui",
+            StaticFiles(directory=str(calib3d_frontend), html=True),
+            name="calib3d-ui",
+        )
 
     if (_FRONTEND_DIST / "assets").is_dir():
         app.mount("/assets", StaticFiles(directory=str(_FRONTEND_DIST / "assets")), name="assets")

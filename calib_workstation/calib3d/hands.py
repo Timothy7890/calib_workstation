@@ -258,7 +258,7 @@ class HandModel:
         candidate = (self.spec.urdf_path.parent / filename).resolve()
         if not candidate.is_file():
             return None
-        return f"/{project_relative(candidate)}"
+        return f"/three-d/{project_relative(candidate)}"
 
     def visuals_payload(self, joints: Any = None) -> list[dict[str, Any]]:
         """每个 link 的 4x4 变换与 mesh 摆放参数，前端直接套用无需解析 URDF。"""

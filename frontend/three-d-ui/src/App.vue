@@ -1,0 +1,2891 @@
+<script setup>
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import * as THREE from 'three'
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
+import { PLYLoader } from 'three/addons/loaders/PLYLoader.js'
+import { STLLoader } from 'three/addons/loaders/STLLoader.js'
+
+const viewerHost = ref(null)
+const status = ref(null)
+const episodes = ref([])
+const episodeTasks = ref([])       // 可切换的任务目录：7012 手动拍摄目录 + 回放服务每次运行
+const taskSwitchBusy = ref(false)
+const ARM_LABEL = { left: '左臂', right: '右臂' }
+const samples = ref([])
+const markerColors = ref([])
+const selectedEpisode = ref('')
+const activeColor = ref('')
+const selections = ref([])
+const cloudBusy = ref(false)
+const saveBusy = ref(false)
+const solveBusy = ref(false)
+const errorMsg = ref('')
+const infoMsg = ref('')
+const cloudId = ref('')
+const cloudStride = ref(1)   // 默认精细
+const pointCount = ref(0)
+const pointSize = ref(1)     // 默认最小点
+const solveResult = ref(null)
+const imageFrontendUrl = `${window.location.protocol}//${window.location.hostname}:7012`
+const mountDiagnosticsFrontendUrl = `${window.location.protocol}//${window.location.hostname}:7015`
+
+// 手安装标定：模型点（每种手一次，可存方案）与各 episode 的实体点独立标注，保存时按槽位配对。全部人工选点，无自动识别。
+const mode = ref('mount')    // 默认手安装标定
+const hands = ref([])
+const selectedHandId = ref('')
+const handModel = ref(null)
+const handBusy = ref(false)
+const activeMountSlotId = ref('palm-red-01')
+const lastMountSelectedPointId = ref('')
+const mountDrafts = ref([])
+const mountSamples = ref([])
+const mountMinPoints = ref(3)
+const mountSavedCloudPoints = ref([])
+// 本 episode 已保存、被 × 标记为待删除的槽位；只改本地状态，点「保存」时才真正删文件
+const mountPendingDeleteIds = ref(new Set())
+const mountProfiles = ref([])
+const selectedMountProfileId = ref('')
+const loadedMountProfileId = ref('')
+const mountProfileName = ref('')
+const mountProfileBusy = ref(false)
+const mountProfileDirty = ref(false)
+const mountSaveBusy = ref(false)
+const mountSaveStatus = ref('')
+const mountSolveBusy = ref(false)
+const mountCalibrations = ref([])
+const selectedMountCalibPath = ref('')
+const mountCalibBusy = ref(false)
+const mountResult = ref(null)
+const mountResultStale = ref(false)
+// 两步法：① 点云一致性（只用实体点） ② 安装解算（模型点 + 各贴纸均值）
+const mountConsistency = ref(null)
+const mountConsistencyBusy = ref(false)
+const mountExcludedIds = ref(new Set())   // 第二步不信任、排除的贴纸
+const mountResultCard = ref(null)
+const overlayVisible = ref(false)
+const mountViewport = ref('model')
+const handViewerHost = ref(null)
+const handHold = ref(null)
+const handHoldBusy = ref(false)
+const mountSlots = [
+  ...Array.from({ length: 8 }, (_, index) => ({
+    point_id: `palm-red-${String(index + 1).padStart(2, '0')}`,
+    label: `手心红点 ${String(index + 1).padStart(2, '0')}`,
+    shortLabel: `红${index + 1}`,
+    side: 'palm',
+    color: '#ef4444',
+  })),
+  ...Array.from({ length: 8 }, (_, index) => ({
+    point_id: `back-green-${String(index + 1).padStart(2, '0')}`,
+    label: `手背绿点 ${String(index + 1).padStart(2, '0')}`,
+    shortLabel: `绿${index + 1}`,
+    side: 'back',
+    color: '#22c55e',
+  })),
+  // 手的两侧（既非手心也非手背）：黄 2 个、粉 2 个
+  ...Array.from({ length: 2 }, (_, index) => ({
+    point_id: `side-yellow-${String(index + 1).padStart(2, '0')}`,
+    label: `手侧黄点 ${String(index + 1).padStart(2, '0')}`,
+    shortLabel: `黄${index + 1}`,
+    side: 'side',
+    color: '#eab308',
+  })),
+  ...Array.from({ length: 2 }, (_, index) => ({
+    point_id: `side-pink-${String(index + 1).padStart(2, '0')}`,
+    label: `手侧粉点 ${String(index + 1).padStart(2, '0')}`,
+    shortLabel: `粉${index + 1}`,
+    side: 'side',
+    color: '#ec4899',
+  })),
+]
+
+const mountSlotGroups = [
+  { side: 'palm', title: '手心', slots: mountSlots.filter((slot) => slot.side === 'palm') },
+  { side: 'back', title: '手背', slots: mountSlots.filter((slot) => slot.side === 'back') },
+  { side: 'side', title: '手侧', slots: mountSlots.filter((slot) => slot.side === 'side') },
+]
+
+let scene
+let camera
+let renderer
+let controls
+let cloudObject
+let cloudMaterial
+let markerGroup
+let resizeObserver
+let requestSerial = 0
+let pointerStart = null
+
+let handScene
+let handCamera
+let handRenderer
+let handControls
+let handMeshGroup
+let handPointGroup
+let handResizeObserver
+let handPointerStart = null
+let handLoadSerial = 0
+let overlayGroup
+let handHoldTimer = null
+const stlCache = new Map()
+
+const currentEpisode = computed(() =>
+  episodes.value.find((item) => item.name === selectedEpisode.value) || null,
+)
+const episodeSamples = computed(() =>
+  samples.value.filter((sample) =>
+    (sample.episode || sample.pose_id || sample.provenance?.episode) === selectedEpisode.value,
+  ),
+)
+const savedColors = computed(() => new Set(episodeSamples.value.map((sample) => sample.color)))
+const selectedColors = computed(() => new Set(selections.value.map((item) => item.color)))
+const selectableColors = computed(() => markerColors.value)
+const currentHand = computed(() =>
+  hands.value.find((item) => item.hand_id === selectedHandId.value) || null,
+)
+const mountSavedForEpisode = computed(() =>
+  mountSamples.value.filter((sample) => sample.pose_id === selectedEpisode.value),
+)
+const mountSavedCountsByEpisode = computed(() => {
+  const counts = {}
+  for (const sample of mountSamples.value) {
+    if (sample.pose_id) counts[sample.pose_id] = (counts[sample.pose_id] || 0) + 1
+  }
+  return counts
+})
+const mountSamplesByPose = computed(() => {
+  const poses = new Set(mountSamples.value.map((sample) => sample.pose_id))
+  return poses.size
+})
+const mountDraftIds = computed(() =>
+  new Set(mountDrafts.value.filter((item) => item.p_hand).map((item) => item.point_id)),
+)
+const allMountModelPointsSelected = computed(() =>
+  mountDraftIds.value.size === mountSlots.length,
+)
+const selectedMountProfile = computed(() =>
+  mountProfiles.value.find((profile) => profile.profile_id === selectedMountProfileId.value) || null,
+)
+const canSaveMountProfile = computed(() =>
+  mountDraftIds.value.size > 0
+  && Boolean(selectedHandId.value)
+  && Boolean(mountProfileName.value.trim())
+  && !mountProfileBusy.value,
+)
+// 模型点与实体点是两个独立测量，只在保存时配对：
+//   cloudPicked = 已在点云上选了实体点；paired = 模型点 + 实体点都有（可保存）；
+//   cloudOnly  = 只有实体点、还缺模型点（保存会跳过，列表里提示）
+const mountCloudPickedIds = computed(() =>
+  new Set(mountDrafts.value.filter((item) => item.vertexIndex != null).map((item) => item.point_id)),
+)
+const mountPairedDrafts = computed(() =>
+  mountDrafts.value.filter((item) => item.vertexIndex != null && Array.isArray(item.p_hand)),
+)
+const mountPairedIds = computed(() => new Set(mountPairedDrafts.value.map((item) => item.point_id)))
+const mountCloudOnlyIds = computed(() =>
+  new Set(
+    mountDrafts.value
+      .filter((item) => item.vertexIndex != null && !Array.isArray(item.p_hand))
+      .map((item) => item.point_id),
+  ),
+)
+const mountSavedIds = computed(() =>
+  new Set(mountSavedForEpisode.value.map((item) => item.point_id)),
+)
+// 已保存但只有实体点、还没有模型点的样本（保存实体点时模型点尚未标）
+const hasModelPoint = (sample) => Array.isArray(sample?.p_hand) && sample.p_hand.length === 3
+const mountSavedMissingModelIds = computed(() =>
+  new Set(mountSavedForEpisode.value.filter((s) => !hasModelPoint(s)).map((s) => s.point_id)),
+)
+const mountSamplesMissingModel = computed(() =>
+  mountSamples.value.filter((s) => !hasModelPoint(s)).length,
+)
+// 当前手型号已保存样本里、能被当前模型点草稿补上/更新的条数
+const mountSamplesApplicable = computed(() =>
+  mountSamples.value.filter(
+    (s) => s.hand_id === selectedHandId.value && mountDraftIds.value.has(s.point_id),
+  ).length,
+)
+const canApplyModelPoints = computed(() =>
+  mountDraftIds.value.size > 0 && mountSamplesApplicable.value > 0 && !mountProfileBusy.value,
+)
+const activeMountDraft = computed(() =>
+  mountDrafts.value.find((item) => item.point_id === activeMountSlotId.value) || null,
+)
+const activeMountSlot = computed(() =>
+  mountSlots.find((item) => item.point_id === activeMountSlotId.value) || null,
+)
+const lastMountSelectedPoint = computed(() =>
+  mountDrafts.value.find((item) => item.point_id === lastMountSelectedPointId.value)
+  || mountSavedCloudPoints.value.find(
+    (item) => item.point_id === lastMountSelectedPointId.value,
+  )
+  || null,
+)
+const canSave = computed(() =>
+  (selections.value.length > 0 || episodeSamples.value.length > 0)
+  && !cloudBusy.value
+  && !saveBusy.value
+  && Boolean(selectedEpisode.value),
+)
+const canSaveMount = computed(() =>
+  (mountCloudPickedIds.value.size > 0 || mountPendingDeleteIds.value.size > 0)
+  && !cloudBusy.value
+  && !mountSaveBusy.value
+  && Boolean(selectedEpisode.value)
+  && Boolean(cloudId.value)
+  && Boolean(selectedHandId.value),
+)
+const residualSummary = computed(() => {
+  const residual = solveResult.value?.residual_mm
+  if (!residual) return null
+  return {
+    rms: Number(residual.rms).toFixed(2),
+    median: Number(residual.median).toFixed(2),
+    max: Number(residual.max).toFixed(2),
+  }
+})
+const mountResidualSummary = computed(() => {
+  const residual = mountResult.value?.residual_mm
+  if (!residual) return null
+  return {
+    rms: Number(residual.rms).toFixed(2),
+    median: Number(residual.median).toFixed(2),
+    max: Number(residual.max).toFixed(2),
+  }
+})
+const mountQualitySummary = computed(() => {
+  if (!mountResult.value?.residual_mm) return null
+  if (mountResultStale.value) {
+    return {
+      tone: 'bad',
+      label: '结果已过期',
+      message: '保存的安装点已发生变化，请重新解算后再使用结果。',
+    }
+  }
+  const rms = Number(mountResult.value.residual_mm.rms)
+  const max = Number(mountResult.value.residual_mm.max)
+  const loo = Number(mountResult.value.leave_one_pose_out?.stats_mm?.rms)
+  if (rms <= 5 && (!Number.isFinite(loo) || loo <= 7)) {
+    return {
+      tone: 'good',
+      label: '结果良好',
+      message: '拟合与跨姿态误差处于建议范围，可继续检查模型叠加。',
+    }
+  }
+  if (rms <= 10) {
+    return {
+      tone: 'warning',
+      label: '误差偏大，建议复核',
+      message: `目标 RMS 建议 ≤ 5 mm；当前 ${rms.toFixed(2)} mm，优先检查下方高误差姿态。`,
+    }
+  }
+  return {
+    tone: 'bad',
+    label: '结果不建议使用',
+    message: `当前 RMS ${rms.toFixed(2)} mm、最大误差 ${max.toFixed(2)} mm，请修正选点后重算。`,
+  }
+})
+const mountTransformSummary = computed(() => {
+  if (!mountResult.value) return null
+  return {
+    translationMm: (mountResult.value.t_wrist2hand_m || [])
+      .map((value) => (Number(value) * 1000).toFixed(2)),
+    rpyDeg: (mountResult.value.rpy_deg || [])
+      .map((value) => Number(value).toFixed(2)),
+  }
+})
+// 两步法表格的行：一致性结果优先，否则用最近一次解算里的 stage1
+const mountStagePoints = computed(() => {
+  const points = mountConsistency.value?.points || mountResult.value?.stage1?.points || []
+  const stage2 = new Map((mountResult.value?.stage2?.points || []).map((p) => [p.point_id, p]))
+  return points.map((p) => ({
+    ...p,
+    stage2: stage2.get(p.point_id) || null,
+    excluded: mountExcludedIds.value.has(p.point_id),
+    slot: mountSlotInfo(p.point_id),
+  }))
+})
+const mountStage2Eligible = computed(() =>
+  mountStagePoints.value.filter((p) => p.has_model_point && !p.excluded).length,
+)
+const mountStage1Summary = computed(() => {
+  const stats = (mountConsistency.value || mountResult.value?.stage1)?.stats_mm
+  if (!stats) return null
+  return { rms: Number(stats.rms).toFixed(2), max: Number(stats.max).toFixed(2), count: stats.count }
+})
+const mountStage1Outliers = computed(() =>
+  (mountConsistency.value || mountResult.value?.stage1)?.outliers || [],
+)
+const mountStage2Summary = computed(() => {
+  const stats = mountResult.value?.stage2?.residual_mm
+  if (!stats) return null
+  return {
+    rms: Number(stats.rms).toFixed(2),
+    median: Number(stats.median).toFixed(2),
+    max: Number(stats.max).toFixed(2),
+    count: mountResult.value.stage2.point_count,
+  }
+})
+const mountLooSummary = computed(() => {
+  const loo = mountResult.value?.leave_one_pose_out
+  if (!loo?.feasible || !loo.stats_mm) return null
+  return {
+    rms: Number(loo.stats_mm.rms).toFixed(2),
+    max: Number(loo.stats_mm.max).toFixed(2),
+    p95: Number(loo.stats_mm.p95).toFixed(2),
+  }
+})
+const mountPoseResidualRows = computed(() =>
+  Object.entries(mountResult.value?.residual_by_pose_mm || {})
+    .map(([poseId, stats]) => ({
+      poseId,
+      count: Number(stats.count) || 0,
+      rms: Number(stats.rms),
+      max: Number(stats.max),
+    }))
+    .sort((a, b) => b.rms - a.rms),
+)
+const mountPointResidualRows = computed(() =>
+  Object.entries(mountResult.value?.residual_by_point_mm || {})
+    .map(([pointId, stats]) => ({
+      pointId,
+      label: mountSlotInfo(pointId).shortLabel,
+      count: Number(stats.count) || 0,
+      rms: Number(stats.rms),
+      max: Number(stats.max),
+    }))
+    .sort((a, b) => b.rms - a.rms)
+    .slice(0, 5),
+)
+const selectedMountCalibration = computed(() =>
+  mountCalibrations.value.find(
+    (item) => item.path === selectedMountCalibPath.value,
+  ) || null,
+)
+const overlayAvailable = computed(() =>
+  Boolean(mountResult.value?.per_pose_overlay_T_camera_hand?.[selectedEpisode.value]),
+)
+const handHoldSummary = computed(() => {
+  const hold = handHold.value
+  if (!hold?.running) {
+    return { tone: 'idle', text: '未开启：手指可被扳动偏离零位，采样期间建议开启' }
+  }
+  if (hold.last_error) {
+    return { tone: 'bad', text: `保持中但报错：${hold.last_error}` }
+  }
+  return {
+    tone: 'ok',
+    text: `保持中 · ${hold.device_id} / ${hold.side === 'left' ? '左手' : '右手'}`
+      + ` · 已下发 ${hold.sent_count} 次`,
+  }
+})
+
+function colorInfo(color) {
+  return markerColors.value.find((item) => item.color === color) || {
+    color,
+    label_zh: color,
+    display_color: '#f8fafc',
+  }
+}
+
+function setError(error) {
+  errorMsg.value = error instanceof Error ? error.message : String(error)
+}
+
+async function responseError(response, fallback) {
+  try {
+    const data = await response.json()
+    return new Error(data.error || fallback)
+  } catch {
+    return new Error(`${fallback}（HTTP ${response.status}）`)
+  }
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 5000) {
+  const controller = new AbortController()
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await fetch(url, { ...options, signal: controller.signal })
+  } finally {
+    window.clearTimeout(timer)
+  }
+}
+
+function initViewer() {
+  scene = new THREE.Scene()
+  scene.background = new THREE.Color(0x080c14)
+
+  camera = new THREE.PerspectiveCamera(48, 1, 0.005, 50)
+  // 相机坐标系为 X 右、Y 下、Z 前。Three.js 相机默认看向 -Z，
+  // 当观察方向改为 +Z 时需同时把 up 设为 -Y，才能保持画面不镜像。
+  camera.up.set(0, -1, 0)
+  camera.position.set(0, 0, -2)
+
+  renderer = new THREE.WebGLRenderer({ antialias: true })
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+  renderer.outputColorSpace = THREE.SRGBColorSpace
+  viewerHost.value.appendChild(renderer.domElement)
+
+  controls = new OrbitControls(camera, renderer.domElement)
+  controls.enableDamping = true
+  controls.dampingFactor = 0.08
+  controls.screenSpacePanning = true
+
+  const grid = new THREE.GridHelper(2, 20, 0x334155, 0x1e293b)
+  scene.add(grid)
+  markerGroup = new THREE.Group()
+  scene.add(markerGroup)
+
+  renderer.domElement.addEventListener('pointerdown', onPointerDown)
+  renderer.domElement.addEventListener('pointerup', onPointerUp)
+  resizeObserver = new ResizeObserver(resizeViewer)
+  resizeObserver.observe(viewerHost.value)
+  renderer.setAnimationLoop(() => {
+    controls.update()
+    renderer.render(scene, camera)
+  })
+  resizeViewer()
+}
+
+function resizeViewer() {
+  if (!renderer || !viewerHost.value) return
+  const width = Math.max(1, viewerHost.value.clientWidth)
+  const height = Math.max(1, viewerHost.value.clientHeight)
+  renderer.setSize(width, height, false)
+  camera.aspect = width / height
+  camera.updateProjectionMatrix()
+}
+
+function disposeCloud() {
+  if (!cloudObject) return
+  scene.remove(cloudObject)
+  cloudObject.geometry.dispose()
+  cloudMaterial.dispose()
+  cloudObject = null
+  cloudMaterial = null
+}
+
+function frameCloud(geometry) {
+  geometry.computeBoundingSphere()
+  const sphere = geometry.boundingSphere
+  if (!sphere) return
+  const center = sphere.center.clone()
+  const radius = Math.max(sphere.radius, 0.12)
+  controls.target.copy(center)
+  camera.position.set(center.x, center.y, center.z - radius * 2.8)
+  camera.near = Math.max(0.001, radius / 200)
+  camera.far = Math.max(10, radius * 30)
+  camera.updateProjectionMatrix()
+  controls.update()
+}
+
+function restoreSavedSelections(geometry) {
+  const saved = episodeSamples.value.filter((sample) =>
+    Array.isArray(sample.p_camera) && sample.p_camera.length === 3,
+  )
+  const position = geometry?.getAttribute('position')
+  if (!position || !saved.length) {
+    selections.value = []
+    refreshHighlights()
+    return 0
+  }
+
+  const restored = saved.map((sample) => {
+    const target = sample.p_camera.map(Number)
+    const savedCloudId = sample.cloud_id || sample.provenance?.cloud_id
+    const savedStride = Number(sample.point_cloud_stride || sample.provenance?.point_cloud_stride)
+    const savedIndex = Number(sample.vertex_index ?? sample.provenance?.vertex_index)
+    let vertexIndex = -1
+
+    if (
+      savedCloudId === cloudId.value
+      && savedStride === cloudStride.value
+      && Number.isInteger(savedIndex)
+      && savedIndex >= 0
+      && savedIndex < position.count
+    ) {
+      vertexIndex = savedIndex
+    } else {
+      let nearestDistanceSq = Infinity
+      for (let index = 0; index < position.count; index += 1) {
+        const dx = position.getX(index) - target[0]
+        const dy = position.getY(index) - target[1]
+        const dz = position.getZ(index) - target[2]
+        const distanceSq = dx * dx + dy * dy + dz * dz
+        if (distanceSq < nearestDistanceSq) {
+          nearestDistanceSq = distanceSq
+          vertexIndex = index
+        }
+      }
+    }
+
+    const point = vertexIndex >= 0
+      ? [position.getX(vertexIndex), position.getY(vertexIndex), position.getZ(vertexIndex)]
+      : target
+    return {
+      color: sample.color,
+      vertexIndex,
+      point,
+      displayPoint: [...point],
+      sampleIndex: sample.index,
+      restored: true,
+    }
+  }).filter((item) => item.vertexIndex >= 0)
+
+  selections.value = restored
+  refreshHighlights()
+  return restored.length
+}
+
+function restoreSavedMountPoints(geometry) {
+  const position = geometry?.getAttribute('position')
+  if (!position) {
+    mountSavedCloudPoints.value = []
+    return 0
+  }
+  mountSavedCloudPoints.value = mountSavedForEpisode.value
+    .filter((sample) => !mountPendingDeleteIds.value.has(sample.point_id))
+    .filter((sample) => Array.isArray(sample.p_camera) && sample.p_camera.length === 3)
+    .map((sample) => {
+      const target = sample.p_camera.map(Number)
+      const savedCloudId = sample.cloud_id || sample.provenance?.cloud_id
+      const savedStride = Number(
+        sample.point_cloud_stride || sample.provenance?.point_cloud_stride,
+      )
+      const savedIndex = Number(sample.vertex_index ?? sample.provenance?.vertex_index)
+      let vertexIndex = -1
+      if (
+        savedCloudId === cloudId.value
+        && savedStride === cloudStride.value
+        && Number.isInteger(savedIndex)
+        && savedIndex >= 0
+        && savedIndex < position.count
+      ) {
+        vertexIndex = savedIndex
+      } else {
+        let nearestDistanceSq = Infinity
+        for (let index = 0; index < position.count; index += 1) {
+          const dx = position.getX(index) - target[0]
+          const dy = position.getY(index) - target[1]
+          const dz = position.getZ(index) - target[2]
+          const distanceSq = dx * dx + dy * dy + dz * dz
+          if (distanceSq < nearestDistanceSq) {
+            nearestDistanceSq = distanceSq
+            vertexIndex = index
+          }
+        }
+      }
+      const point = vertexIndex >= 0
+        ? [position.getX(vertexIndex), position.getY(vertexIndex), position.getZ(vertexIndex)]
+        : target
+      return {
+        ...sample,
+        vertexIndex,
+        point,
+        displayPoint: [...point],
+      }
+    })
+    .filter((item) => item.vertexIndex >= 0)
+  refreshHighlights()
+  return mountSavedCloudPoints.value.length
+}
+
+async function loadPointCloud() {
+  const episode = selectedEpisode.value
+  if (!episode || !renderer) return
+  const serial = ++requestSerial
+  cloudBusy.value = true
+  errorMsg.value = ''
+  infoMsg.value = ''
+  solveResult.value = null
+  selections.value = []
+  keepOnlyMountModelPoints()
+  mountSavedCloudPoints.value = []
+  mountPendingDeleteIds.value = new Set()
+  lastMountSelectedPointId.value = ''
+  cloudId.value = ''
+  pointCount.value = 0
+  refreshHighlights()
+  disposeCloud()
+  try {
+    const response = await fetch(
+      `/api/offline/episodes/${encodeURIComponent(episode)}/point-cloud.ply`
+      + `?stride=${cloudStride.value}&v=${Date.now()}`,
+    )
+    if (!response.ok) throw await responseError(response, '点云加载失败')
+    const id = response.headers.get('X-Point-Cloud-Id')
+    const count = Number(response.headers.get('X-Point-Count'))
+    const stride = Number(response.headers.get('X-Point-Cloud-Stride'))
+    const buffer = await response.arrayBuffer()
+    const geometry = new PLYLoader().parse(buffer)
+    if (serial !== requestSerial || episode !== selectedEpisode.value) {
+      geometry.dispose()
+      return
+    }
+    if (!geometry.getAttribute('position') || geometry.getAttribute('position').count === 0) {
+      geometry.dispose()
+      throw new Error('点云中没有可选顶点')
+    }
+    cloudMaterial = new THREE.PointsMaterial({
+      size: pointSize.value / 1000,
+      vertexColors: Boolean(geometry.getAttribute('color')),
+      sizeAttenuation: true,
+    })
+    cloudObject = new THREE.Points(geometry, cloudMaterial)
+    scene.add(cloudObject)
+    cloudId.value = id || ''
+    pointCount.value = Number.isFinite(count) ? count : geometry.getAttribute('position').count
+    cloudStride.value = Number.isFinite(stride) ? stride : cloudStride.value
+    frameCloud(geometry)
+    const restoredCount = restoreSavedSelections(geometry)
+    const restoredMountCount = restoreSavedMountPoints(geometry)
+    if (mode.value === 'mount' && restoredMountCount) {
+      infoMsg.value = `已恢复本姿态 ${restoredMountCount} 个安装配对点`
+    } else {
+      infoMsg.value = restoredCount
+        ? `已恢复 ${restoredCount} 个已保存选点，可选择颜色后重新选点`
+        : `已加载 ${pointCount.value.toLocaleString()} 个稳定点`
+    }
+  } catch (error) {
+    if (serial === requestSerial) setError(error)
+  } finally {
+    if (serial === requestSerial) cloudBusy.value = false
+  }
+}
+
+function onPointerDown(event) {
+  pointerStart = { x: event.clientX, y: event.clientY }
+}
+
+function onPointerUp(event) {
+  if (!pointerStart || !cloudObject) return
+  if (mode.value === 'marker' && !activeColor.value) return
+  if (mode.value === 'mount' && !activeMountSlot.value) {
+    const moved = Math.hypot(event.clientX - pointerStart.x, event.clientY - pointerStart.y)
+    pointerStart = null
+    if (moved <= 5) infoMsg.value = '请先在右侧选择一个槽位（红 1–8 / 绿 1–8），再点击点云'
+    return
+  }
+  const moved = Math.hypot(event.clientX - pointerStart.x, event.clientY - pointerStart.y)
+  pointerStart = null
+  if (moved > 5) return
+
+  const rect = renderer.domElement.getBoundingClientRect()
+  const mouse = new THREE.Vector2(
+    ((event.clientX - rect.left) / rect.width) * 2 - 1,
+    -((event.clientY - rect.top) / rect.height) * 2 + 1,
+  )
+  const raycaster = new THREE.Raycaster()
+  raycaster.params.Points.threshold = Math.max(0.003, pointSize.value / 700)
+  raycaster.setFromCamera(mouse, camera)
+  cloudObject.updateMatrixWorld(true)
+  const position = cloudObject.geometry.getAttribute('position')
+  const candidate = raycaster
+        .intersectObject(cloudObject, false)
+        .filter((hit) => hit.index != null)
+        .map((hit) => {
+          const projected = new THREE.Vector3(
+            position.getX(hit.index),
+            position.getY(hit.index),
+            position.getZ(hit.index),
+          )
+            .applyMatrix4(cloudObject.matrixWorld)
+            .project(camera)
+          const dx = (projected.x - mouse.x) * rect.width / 2
+          const dy = (projected.y - mouse.y) * rect.height / 2
+          return { hit, screenDistancePx: Math.hypot(dx, dy) }
+        })
+        .sort((a, b) => a.screenDistancePx - b.screenDistancePx)[0]
+  if (!candidate) {
+    infoMsg.value = '没有命中点，请放大后重试'
+    return
+  }
+
+  const { hit, screenDistancePx } = candidate
+  const point = [position.getX(hit.index), position.getY(hit.index), position.getZ(hit.index)]
+  const displayPoint = new THREE.Vector3(...point)
+    .applyMatrix4(cloudObject.matrixWorld)
+    .toArray()
+
+  if (mode.value === 'mount') {
+    // 槽位还没有模型点也可以先选实体点：以槽位信息新建草稿，模型点稍后在零位手模型上补
+    const draft = activeMountDraft.value || { ...activeMountSlot.value }
+    const duplicateDraft = mountDrafts.value.find(
+      (item) => item.point_id !== draft.point_id && item.vertexIndex === hit.index,
+    )
+    const duplicateSaved = mountSavedForEpisode.value.find(
+      (item) => item.point_id !== draft.point_id
+        && Number(item.vertex_index ?? item.provenance?.vertex_index) === hit.index,
+    )
+    if (duplicateDraft || duplicateSaved) {
+      infoMsg.value = `该实体候选已分配给 ${duplicateDraft?.label || duplicateSaved?.label || duplicateSaved?.point_id}`
+      return
+    }
+    mountDrafts.value = [
+      ...mountDrafts.value.filter((item) => item.point_id !== draft.point_id),
+      {
+        ...draft,
+        vertexIndex: hit.index,
+        point,
+        displayPoint,
+      },
+    ]
+    lastMountSelectedPointId.value = draft.point_id
+    refreshHighlights()
+    refreshHandPointMarkers()
+    const next = chooseNextMountCloudSlot(draft.point_id)
+    const modelHint = draft.p_hand ? '' : '（该槽位还缺模型点，保存前请到「零位手模型」补上）'
+    infoMsg.value = next
+      ? `${draft.label} 实体点已选${modelHint}；可继续选 ${next.label}`
+      : `${draft.label} 实体点已选${modelHint}`
+    return
+  }
+
+  const color = activeColor.value
+  const next = selections.value.filter((item) => item.color !== color)
+  const previous = selections.value.find((item) => item.color === color)
+  next.push({
+    color,
+    vertexIndex: hit.index,
+    point,
+    displayPoint,
+    sampleIndex: previous?.sampleIndex,
+    restored: false,
+  })
+  selections.value = next
+  infoMsg.value = `${colorInfo(color).label_zh}选点已更新（距点击 ${screenDistancePx.toFixed(1)} px）`
+  refreshHighlights()
+  chooseNextColor()
+}
+
+function chooseNextColor() {
+  const next = selectableColors.value.find((item) => !selectedColors.value.has(item.color))
+  if (next) activeColor.value = next.color
+}
+
+function refreshHighlights() {
+  if (!markerGroup) return
+  while (markerGroup.children.length) {
+    const child = markerGroup.children[0]
+    markerGroup.remove(child)
+    child.geometry?.dispose()
+    child.material?.dispose()
+  }
+  const highlightItems = mode.value === 'mount'
+    ? [
+        ...mountSavedCloudPoints.value.map((selection) => ({
+          selection,
+          color: mountSlotInfo(selection.point_id).color,
+          saved: true,
+        })),
+        ...mountDrafts.value
+          .filter((selection) => selection.vertexIndex != null)
+          .map((selection) => ({
+            selection,
+            color: mountSlotInfo(selection.point_id).color,
+            saved: false,
+          })),
+      ]
+    : selections.value.map((selection) => ({
+        selection,
+        color: colorInfo(selection.color).display_color,
+        saved: false,
+      }))
+  for (const { selection, color, saved } of highlightItems) {
+    const isLatest = mode.value === 'mount'
+      && selection.point_id === lastMountSelectedPointId.value
+    const mesh = new THREE.Mesh(
+      new THREE.SphereGeometry(
+        isLatest ? 0.0065 : (saved ? 0.0032 : 0.0042),
+        16,
+        12,
+      ),
+      new THREE.MeshBasicMaterial({
+        color,
+        transparent: saved,
+        opacity: saved ? 0.65 : 1,
+      }),
+    )
+    const displayPoint = selection.displayPoint || [
+      selection.point[0],
+      selection.point[1],
+      selection.point[2],
+    ]
+    mesh.position.fromArray(displayPoint)
+    markerGroup.add(mesh)
+    if (isLatest) {
+      const halo = new THREE.Mesh(
+        new THREE.SphereGeometry(0.009, 18, 12),
+        new THREE.MeshBasicMaterial({
+          color: '#ffffff',
+          transparent: true,
+          opacity: 0.9,
+          wireframe: true,
+        }),
+      )
+      halo.position.fromArray(displayPoint)
+      markerGroup.add(halo)
+    }
+  }
+}
+
+function mountSlotInfo(pointId) {
+  return mountSlots.find((slot) => slot.point_id === pointId) || {
+    point_id: pointId,
+    label: pointId,
+    color: '#f8fafc',
+  }
+}
+
+function modelOnlyMountDraft(item) {
+  const slot = mountSlotInfo(item.point_id)
+  return {
+    ...slot,
+    link: item.link,
+    p_local: Array.isArray(item.p_local) ? [...item.p_local] : [...item.p_hand],
+    p_hand: [...item.p_hand],
+    meshFaceIndex: item.meshFaceIndex,
+  }
+}
+
+function savedModelDraftsForHand(handId) {
+  const byId = new Map()
+  for (const sample of mountSamples.value) {
+    if (
+      sample.hand_id === handId
+      && mountSlots.some((slot) => slot.point_id === sample.point_id)
+      && Array.isArray(sample.p_hand)
+      && sample.p_hand.length === 3
+    ) {
+      byId.set(sample.point_id, modelOnlyMountDraft(sample))
+    }
+  }
+  return mountSlots
+    .map((slot) => byId.get(slot.point_id))
+    .filter(Boolean)
+}
+
+function keepOnlyMountModelPoints() {
+  mountDrafts.value = mountDrafts.value
+    .filter((item) => Array.isArray(item.p_hand))
+    .map(modelOnlyMountDraft)
+}
+
+async function refreshMountProfiles(handId = selectedHandId.value) {
+  if (!handId) {
+    mountProfiles.value = []
+    selectedMountProfileId.value = ''
+    return
+  }
+  const response = await fetch(
+    `/api/mount/model-point-profiles?hand_id=${encodeURIComponent(handId)}`,
+  )
+  if (!response.ok) throw await responseError(response, '模型点方案加载失败')
+  const data = await response.json()
+  mountProfiles.value = data.profiles || []
+  if (!mountProfiles.value.some(
+    (profile) => profile.profile_id === selectedMountProfileId.value,
+  )) {
+    selectedMountProfileId.value = mountProfiles.value[0]?.profile_id || ''
+  }
+}
+
+function selectMountProfile() {
+  if (selectedMountProfile.value) {
+    mountProfileName.value = selectedMountProfile.value.name
+  }
+}
+
+function currentModelPoints() {
+  return mountSlots.flatMap((slot) => {
+    const draft = mountDrafts.value.find((item) => item.point_id === slot.point_id)
+    if (!draft?.p_hand) return []
+    return [{
+      point_id: slot.point_id,
+      label: slot.label,
+      link: draft.link,
+      p_local: draft.p_local,
+      p_hand: draft.p_hand,
+    }]
+  })
+}
+
+// 模型点是"每种手一份"，实体点是"每个 episode 一份"，二者独立保存；这里把当前模型点合并进已保存样本。
+async function applyModelPointsToSamples({ silent = false } = {}) {
+  const points = currentModelPoints()
+  if (!points.length || !selectedHandId.value) return null
+  const response = await fetch('/api/mount/samples/apply-model-points', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ hand_id: selectedHandId.value, points }),
+  })
+  if (!response.ok) throw await responseError(response, '模型点写入已保存样本失败')
+  const data = await response.json()
+  if (data.updated) {
+    await refreshMountSamples()
+    mountResult.value = null
+  }
+  if (!silent) {
+    infoMsg.value = data.updated
+      ? `模型点已写入 ${data.updated} 条已保存样本（补齐 ${data.filled} 条）${data.still_missing ? `，仍有 ${data.still_missing} 条缺模型点` : ''}`
+      : '已保存样本的模型点与当前一致，无需更新'
+  }
+  return data
+}
+
+async function applyModelPoints() {
+  if (!canApplyModelPoints.value) return
+  mountProfileBusy.value = true
+  errorMsg.value = ''
+  try {
+    await applyModelPointsToSamples()
+  } catch (error) {
+    setError(error)
+  } finally {
+    mountProfileBusy.value = false
+  }
+}
+
+async function saveMountProfile() {
+  if (!canSaveMountProfile.value) return
+  mountProfileBusy.value = true
+  errorMsg.value = ''
+  try {
+    const points = currentModelPoints()
+    const response = await fetch('/api/mount/model-point-profiles', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        schema_version: 1,
+        name: mountProfileName.value.trim(),
+        hand_id: selectedHandId.value,
+        points,
+      }),
+    })
+    if (!response.ok) throw await responseError(response, '模型点方案保存失败')
+    const data = await response.json()
+    await refreshMountProfiles(selectedHandId.value)
+    selectedMountProfileId.value = data.profile.profile_id
+    loadedMountProfileId.value = data.profile.profile_id
+    mountProfileName.value = data.profile.name
+    mountProfileDirty.value = false
+    infoMsg.value = data.created
+      ? `模型点方案“${data.profile.name}”已保存（${data.profile.point_count}/${mountSlots.length}）`
+      : `模型点方案“${data.profile.name}”已覆盖（${data.profile.point_count}/${mountSlots.length}）`
+    // 保存模型点修改的同时，同步到该手型号已保存的样本
+    const applied = await applyModelPointsToSamples({ silent: true })
+    if (applied?.updated) infoMsg.value += `；已同步写入 ${applied.updated} 条已保存样本`
+  } catch (error) {
+    setError(error)
+  } finally {
+    mountProfileBusy.value = false
+  }
+}
+
+async function loadMountProfile() {
+  const profileId = selectedMountProfileId.value
+  if (!profileId || mountProfileBusy.value) return
+  if (
+    mountProfileDirty.value
+    && !window.confirm('当前模型点有未保存修改，确定加载其他方案并覆盖吗？')
+  ) {
+    return
+  }
+  mountProfileBusy.value = true
+  errorMsg.value = ''
+  try {
+    const response = await fetch(
+      `/api/mount/model-point-profiles/${encodeURIComponent(profileId)}`,
+    )
+    if (!response.ok) throw await responseError(response, '模型点方案读取失败')
+    const data = await response.json()
+    const profile = data.profile
+    if (profile.hand_id !== selectedHandId.value) {
+      throw new Error('模型点方案与当前手型号不匹配')
+    }
+    mountDrafts.value = profile.points.map(modelOnlyMountDraft)
+    loadedMountProfileId.value = profile.profile_id
+    mountProfileName.value = profile.name
+    mountProfileDirty.value = false
+    activeMountSlotId.value = mountSlots.find(
+      (slot) => !mountDraftIds.value.has(slot.point_id),
+    )?.point_id || mountSlots[0].point_id
+    mountViewport.value = 'model'
+    refreshHighlights()
+    refreshHandPointMarkers()
+    infoMsg.value = `已加载模型点方案“${profile.name}”的 ${profile.points.length} 个点`
+  } catch (error) {
+    setError(error)
+  } finally {
+    mountProfileBusy.value = false
+  }
+}
+
+async function deleteMountProfile() {
+  const profile = selectedMountProfile.value
+  if (!profile || mountProfileBusy.value) return
+  if (!window.confirm(`确定删除模型点方案“${profile.name}”吗？`)) return
+  mountProfileBusy.value = true
+  errorMsg.value = ''
+  try {
+    const response = await fetch(
+      `/api/mount/model-point-profiles/${encodeURIComponent(profile.profile_id)}`,
+      { method: 'DELETE' },
+    )
+    if (!response.ok) throw await responseError(response, '模型点方案删除失败')
+    if (loadedMountProfileId.value === profile.profile_id) {
+      loadedMountProfileId.value = ''
+      mountProfileDirty.value = mountDraftIds.value.size > 0
+    }
+    await refreshMountProfiles(selectedHandId.value)
+    infoMsg.value = `模型点方案“${profile.name}”已删除；当前模型点未清空`
+  } catch (error) {
+    setError(error)
+  } finally {
+    mountProfileBusy.value = false
+  }
+}
+
+function nextMountSlotAfter(pointId, isPending) {
+  const currentIndex = mountSlots.findIndex((slot) => slot.point_id === pointId)
+  const ordered = currentIndex < 0
+    ? mountSlots
+    : [...mountSlots.slice(currentIndex + 1), ...mountSlots.slice(0, currentIndex)]
+  return ordered.find(isPending)
+}
+
+function chooseNextMountModelSlot(currentPointId = '') {
+  const next = nextMountSlotAfter(
+    currentPointId,
+    (slot) => !mountDraftIds.value.has(slot.point_id),
+  )
+  if (next) activeMountSlotId.value = next.point_id
+  return next
+}
+
+function chooseNextMountCloudSlot(currentPointId = '') {
+  const next = nextMountSlotAfter(
+    currentPointId,
+    (slot) =>
+      !mountCloudPickedIds.value.has(slot.point_id) && !mountSavedIds.value.has(slot.point_id),
+  )
+  if (next) {
+    activeMountSlotId.value = next.point_id
+    mountViewport.value = 'cloud'
+  }
+  return next
+}
+
+
+function removeSelection(color) {
+  selections.value = selections.value.filter((item) => item.color !== color)
+  activeColor.value = color
+  refreshHighlights()
+}
+
+function clearSelections() {
+  selections.value = []
+  chooseNextColor()
+  refreshHighlights()
+}
+
+// ---------- 手安装标定：零位手模型与固定槽配对 ----------
+
+function matrixFromRows(rows) {
+  const matrix = new THREE.Matrix4()
+  matrix.set(
+    rows[0][0], rows[0][1], rows[0][2], rows[0][3],
+    rows[1][0], rows[1][1], rows[1][2], rows[1][3],
+    rows[2][0], rows[2][1], rows[2][2], rows[2][3],
+    rows[3][0], rows[3][1], rows[3][2], rows[3][3],
+  )
+  return matrix
+}
+
+function urdfOriginMatrix(xyz, rpy, scale) {
+  const matrix = new THREE.Matrix4()
+  matrix.compose(
+    new THREE.Vector3(...xyz),
+    new THREE.Quaternion().setFromEuler(new THREE.Euler(rpy[0], rpy[1], rpy[2], 'ZYX')),
+    new THREE.Vector3(...scale),
+  )
+  return matrix
+}
+
+function loadStl(url) {
+  if (!stlCache.has(url)) {
+    stlCache.set(
+      url,
+      new Promise((resolve, reject) => {
+        new STLLoader().load(
+          url,
+          resolve,
+          undefined,
+          () => reject(new Error(`模型加载失败: ${url}`)),
+        )
+      }),
+    )
+  }
+  return stlCache.get(url)
+}
+
+function clearGroup(group, disposeGeometry = false) {
+  if (!group) return
+  while (group.children.length) {
+    const child = group.children[0]
+    group.remove(child)
+    if (disposeGeometry) child.geometry?.dispose()
+    child.material?.dispose()
+  }
+}
+
+function initHandViewer() {
+  if (handRenderer || !handViewerHost.value) return
+  handScene = new THREE.Scene()
+  handScene.background = new THREE.Color(0x0b1220)
+  handCamera = new THREE.PerspectiveCamera(45, 1, 0.001, 10)
+  handCamera.position.set(0.22, -0.18, 0.22)
+
+  handRenderer = new THREE.WebGLRenderer({ antialias: true })
+  handRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+  handRenderer.outputColorSpace = THREE.SRGBColorSpace
+  handViewerHost.value.appendChild(handRenderer.domElement)
+
+  handControls = new OrbitControls(handCamera, handRenderer.domElement)
+  handControls.enableDamping = true
+  handControls.dampingFactor = 0.08
+  handScene.add(new THREE.HemisphereLight(0xdbeafe, 0x1e293b, 1.1))
+  const keyLight = new THREE.DirectionalLight(0xffffff, 1.4)
+  keyLight.position.set(0.5, 0.8, 1)
+  handScene.add(keyLight)
+  const fillLight = new THREE.DirectionalLight(0x93c5fd, 0.5)
+  fillLight.position.set(-0.6, -0.4, -0.8)
+  handScene.add(fillLight)
+  handScene.add(new THREE.AxesHelper(0.05))
+
+  handMeshGroup = new THREE.Group()
+  handPointGroup = new THREE.Group()
+  handScene.add(handMeshGroup)
+  handScene.add(handPointGroup)
+  handRenderer.domElement.addEventListener('pointerdown', onHandPointerDown)
+  handRenderer.domElement.addEventListener('pointerup', onHandPointerUp)
+  handResizeObserver = new ResizeObserver(resizeHandViewer)
+  handResizeObserver.observe(handViewerHost.value)
+  handRenderer.setAnimationLoop(() => {
+    handControls.update()
+    handRenderer.render(handScene, handCamera)
+  })
+  resizeHandViewer()
+}
+
+function resizeHandViewer() {
+  if (!handRenderer || !handViewerHost.value) return
+  const width = Math.max(1, handViewerHost.value.clientWidth)
+  const height = Math.max(1, handViewerHost.value.clientHeight)
+  handRenderer.setSize(width, height, false)
+  handCamera.aspect = width / height
+  handCamera.updateProjectionMatrix()
+}
+
+function frameHandModel() {
+  const box = new THREE.Box3().setFromObject(handMeshGroup)
+  if (box.isEmpty()) return
+  const center = box.getCenter(new THREE.Vector3())
+  const radius = Math.max(box.getSize(new THREE.Vector3()).length() / 2, 0.06)
+  handControls.target.copy(center)
+  handCamera.position.set(
+    center.x + radius * 1.6,
+    center.y - radius * 1.2,
+    center.z + radius * 1.6,
+  )
+  handCamera.near = radius / 100
+  handCamera.far = radius * 50
+  handCamera.updateProjectionMatrix()
+  handControls.update()
+}
+
+function refreshHandPointMarkers() {
+  clearGroup(handPointGroup, true)
+  if (!handModel.value) return
+  const saved = mountSavedForEpisode.value.filter(
+    (sample) => sample.hand_id === selectedHandId.value && Array.isArray(sample.p_hand),
+  )
+  const byId = new Map(saved.map((item) => [item.point_id, { ...item, saved: true }]))
+  for (const draft of mountDrafts.value) {
+    if (draft.p_hand) byId.set(draft.point_id, { ...draft, saved: false })
+  }
+  for (const item of byId.values()) {
+    const active = activeMountSlotId.value === item.point_id
+    const mesh = new THREE.Mesh(
+      new THREE.SphereGeometry(active ? 0.0055 : 0.004, 16, 12),
+      new THREE.MeshBasicMaterial({
+        color: mountSlotInfo(item.point_id).color,
+      }),
+    )
+    mesh.position.fromArray(item.p_hand)
+    handPointGroup.add(mesh)
+  }
+}
+
+async function loadHandModel() {
+  if (!selectedHandId.value || !handRenderer) return
+  const serial = ++handLoadSerial
+  handBusy.value = true
+  errorMsg.value = ''
+  try {
+    // 不传 joints，后端固定返回全零关节模型。
+    const response = await fetch(`/api/hands/${encodeURIComponent(selectedHandId.value)}/model`)
+    if (!response.ok) throw await responseError(response, '手模型加载失败')
+    const payload = await response.json()
+    const meshes = []
+    for (const link of payload.links || []) {
+      const THandLink = matrixFromRows(link.T_hand_link)
+      for (const visual of link.visuals || []) {
+        const geometry = await loadStl(visual.mesh_url)
+        meshes.push({
+          geometry,
+          link: link.link,
+          THandLink,
+          matrix: THandLink.clone().multiply(
+            urdfOriginMatrix(visual.xyz, visual.rpy, visual.scale),
+          ),
+        })
+      }
+    }
+    if (serial !== handLoadSerial) return
+    handModel.value = payload
+    mountDrafts.value = savedModelDraftsForHand(payload.hand_id)
+    loadedMountProfileId.value = ''
+    mountProfileName.value = ''
+    mountProfileDirty.value = mountDrafts.value.length > 0
+    activeMountSlotId.value = mountSlots.find(
+      (slot) => !mountDraftIds.value.has(slot.point_id),
+    )?.point_id || mountSlots[0].point_id
+    mountResult.value = null
+    overlayVisible.value = false
+    clearGroup(handMeshGroup)
+    for (const item of meshes) {
+      const mesh = new THREE.Mesh(
+        item.geometry,
+        new THREE.MeshStandardMaterial({
+          color: 0x94a3b8,
+          metalness: 0.15,
+          roughness: 0.6,
+        }),
+      )
+      mesh.matrixAutoUpdate = false
+      mesh.matrix.copy(item.matrix)
+      mesh.userData.link = item.link
+      mesh.userData.THandLink = item.THandLink
+      handMeshGroup.add(mesh)
+    }
+    clearOverlay()
+    refreshHighlights()
+    refreshHandPointMarkers()
+    frameHandModel()
+    infoMsg.value = mountDraftIds.value.size
+      ? `${payload.label} 已恢复 ${mountDraftIds.value.size} 个模型点，可继续补标或直接去点云选实体点`
+      : `${payload.label} 全零关节模型已加载，请标注你信任的模型点`
+  } catch (error) {
+    if (serial === handLoadSerial) setError(error)
+  } finally {
+    if (serial === handLoadSerial) handBusy.value = false
+  }
+}
+
+function focusMountCloudPoint(cloudPoint) {
+  if (!camera || !controls) return
+  const displayPoint = cloudPoint.displayPoint || cloudPoint.point || cloudPoint.p_camera
+  if (!Array.isArray(displayPoint) || displayPoint.length !== 3) return
+  const target = new THREE.Vector3(...displayPoint)
+  const offset = camera.position.clone().sub(controls.target)
+  controls.target.copy(target)
+  camera.position.copy(target).add(offset)
+  controls.update()
+}
+
+function activateMountSlot(pointId) {
+  activeMountSlotId.value = pointId
+  const draft = mountDrafts.value.find((item) => item.point_id === pointId)
+  const saved = mountSavedForEpisode.value.find((item) => item.point_id === pointId)
+  const restored = mountSavedCloudPoints.value.find((item) => item.point_id === pointId)
+  const cloudPoint = draft?.vertexIndex != null ? draft : (restored || saved)
+  if (mountViewport.value === 'model') {
+    infoMsg.value = draft?.p_hand
+      ? `${draft.label} 模型点已选；再次点击 mesh 可修正`
+      : `请在零位手模型上标注 ${mountSlotInfo(pointId).label}`
+  } else if (cloudPoint) {
+    mountViewport.value = 'cloud'
+    lastMountSelectedPointId.value = pointId
+    const point = cloudPoint.point || cloudPoint.p_camera
+    const vertexIndex = cloudPoint.vertexIndex ?? cloudPoint.vertex_index
+    infoMsg.value = `${mountSlotInfo(pointId).label}：vertex #${vertexIndex}，坐标 ${point.map((value) => Number(value).toFixed(4)).join(', ')}；点云中白色光圈即为该点`
+    nextTick(() => {
+      resizeViewer()
+      focusMountCloudPoint(cloudPoint)
+    })
+  } else {
+    const label = mountSlotInfo(pointId).label
+    infoMsg.value = draft?.p_hand
+      ? `请在当前 episode 点云选择 ${label}`
+      : `请在当前 episode 点云选择 ${label}（模型点可稍后在「零位手模型」补）`
+  }
+  refreshHighlights()
+  refreshHandPointMarkers()
+}
+
+function onHandPointerDown(event) {
+  handPointerStart = { x: event.clientX, y: event.clientY }
+}
+
+function onHandPointerUp(event) {
+  if (!handPointerStart || !handMeshGroup || !activeMountSlot.value) return
+  const moved = Math.hypot(
+    event.clientX - handPointerStart.x,
+    event.clientY - handPointerStart.y,
+  )
+  handPointerStart = null
+  if (moved > 5) return
+
+  const rect = handRenderer.domElement.getBoundingClientRect()
+  const mouse = new THREE.Vector2(
+    ((event.clientX - rect.left) / rect.width) * 2 - 1,
+    -((event.clientY - rect.top) / rect.height) * 2 + 1,
+  )
+  const raycaster = new THREE.Raycaster()
+  raycaster.setFromCamera(mouse, handCamera)
+  const hit = raycaster.intersectObjects(handMeshGroup.children, false)[0]
+  if (!hit) {
+    infoMsg.value = '没有命中手模型 mesh，请旋转或放大后重试'
+    return
+  }
+
+  const slot = activeMountSlot.value
+  const existing = activeMountDraft.value
+  const pHand = hit.point.clone()
+  const pLocal = pHand.clone().applyMatrix4(
+    hit.object.userData.THandLink.clone().invert(),
+  )
+  mountDrafts.value = [
+    ...mountDrafts.value.filter((item) => item.point_id !== slot.point_id),
+    {
+      ...slot,
+      vertexIndex: existing?.vertexIndex,
+      point: existing?.point,
+      displayPoint: existing?.displayPoint,
+      link: hit.object.userData.link,
+      p_local: pLocal.toArray(),
+      p_hand: pHand.toArray(),
+      meshFaceIndex: hit.faceIndex,
+    },
+  ]
+  mountProfileDirty.value = true
+  const next = chooseNextMountModelSlot(slot.point_id)
+  infoMsg.value = next
+    ? `${slot.label} 模型点已选；下一项：${next.label}`
+    : '模型点已全部标注；实体点随时可在「实体点云」里选'
+  refreshHighlights()
+  refreshHandPointMarkers()
+}
+
+function removeMountDraft(pointId) {
+  const draft = mountDrafts.value.find((item) => item.point_id === pointId)
+  mountDrafts.value = [
+    ...mountDrafts.value.filter((item) => item.point_id !== pointId),
+    ...(draft?.p_hand ? [modelOnlyMountDraft(draft)] : []),
+  ]
+  activeMountSlotId.value = pointId
+  if (lastMountSelectedPointId.value === pointId) lastMountSelectedPointId.value = ''
+  mountViewport.value = 'cloud'
+  refreshHighlights()
+  refreshHandPointMarkers()
+}
+
+async function clearMountSlotCloudPoint(pointId) {
+  activeMountSlotId.value = pointId
+  const draft = mountDrafts.value.find(
+    (item) => item.point_id === pointId && item.vertexIndex != null,
+  )
+  if (draft) {
+    removeMountDraft(pointId)
+    infoMsg.value = `已撤销 ${mountSlotInfo(pointId).shortLabel} 的待保存实体点；模型点仍保留`
+    return
+  }
+  const saved = mountSavedForEpisode.value.find((item) => item.point_id === pointId)
+  if (!saved) return
+  const next = new Set(mountPendingDeleteIds.value)
+  const label = mountSlotInfo(pointId).shortLabel
+  if (next.has(pointId)) {
+    next.delete(pointId)
+    infoMsg.value = `已取消删除 ${label}，文件未改动`
+  } else {
+    next.add(pointId)
+    infoMsg.value = `${label} 已标记为待删除；点「保存」才会真正删除，再按 × 可取消`
+  }
+  mountPendingDeleteIds.value = next
+  restoreSavedMountPoints(cloudObject?.geometry)
+  refreshHighlights()
+}
+
+function clearMountDrafts() {
+  mountDrafts.value = []
+  mountProfileDirty.value = true
+  activeMountSlotId.value = mountSlots[0].point_id
+  mountViewport.value = 'model'
+  refreshHighlights()
+  refreshHandPointMarkers()
+}
+
+function clearMountCloudSelections() {
+  keepOnlyMountModelPoints()
+  mountPendingDeleteIds.value = new Set()
+  lastMountSelectedPointId.value = ''
+  restoreSavedMountPoints(cloudObject?.geometry)
+  refreshHighlights()
+  refreshHandPointMarkers()
+  infoMsg.value = '已撤销当前 episode 尚未保存的点云修改（新选与待删除）；模型点仍保留'
+}
+
+async function loadHandsCatalog() {
+  const response = await fetch('/api/hands')
+  if (!response.ok) throw await responseError(response, '手型号目录加载失败')
+  const data = await response.json()
+  hands.value = data.hands || []
+  if (!hands.value.some((item) => item.hand_id === selectedHandId.value)) {
+    const savedHandId = mountSamples.value[0]?.hand_id
+    selectedHandId.value = hands.value.find((item) => item.hand_id === savedHandId)?.hand_id
+      || hands.value[0]?.hand_id
+      || ''
+  }
+}
+
+async function refreshMountSamples() {
+  const response = await fetch('/api/mount/samples')
+  if (!response.ok) throw await responseError(response, '安装样本加载失败')
+  const data = await response.json()
+  mountSamples.value = data.samples || []
+  mountMinPoints.value = Number(data.min_points) || 3
+  if (cloudObject) restoreSavedMountPoints(cloudObject.geometry)
+  refreshHandPointMarkers()
+}
+
+async function refreshMountCalibrations() {
+  mountCalibBusy.value = true
+  try {
+    const response = await fetch('/api/mount/calibrations')
+    if (!response.ok) throw await responseError(response, '相机外参列表加载失败')
+    const data = await response.json()
+    mountCalibrations.value = data.calibrations || []
+    const current = mountCalibrations.value.find(
+      (item) => item.path === selectedMountCalibPath.value && item.compatible,
+    )
+    selectedMountCalibPath.value = current?.path || data.recommended_path || ''
+  } finally {
+    mountCalibBusy.value = false
+  }
+}
+
+async function refreshMountResult() {
+  const response = await fetch('/api/mount/result')
+  if (!response.ok) throw await responseError(response, '安装标定结果加载失败')
+  const data = await response.json()
+  mountResult.value = data.result || null
+  mountResultStale.value = Boolean(data.stale)
+}
+
+async function refreshHandHold(showError = false) {
+  try {
+    const response = await fetch('/api/mount/hand-hold')
+    if (!response.ok) throw await responseError(response, '手保持状态加载失败')
+    handHold.value = (await response.json()).hold || null
+  } catch (error) {
+    if (showError) setError(error)
+  }
+}
+
+async function toggleHandHold() {
+  if (handHoldBusy.value) return
+  handHoldBusy.value = true
+  errorMsg.value = ''
+  try {
+    const running = Boolean(handHold.value?.running)
+    const response = await fetch(
+      running ? '/api/mount/hand-hold/stop' : '/api/mount/hand-hold/start',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(running ? {} : { hand_id: selectedHandId.value }),
+      },
+    )
+    if (!response.ok) throw await responseError(response, '手保持操作失败')
+    handHold.value = (await response.json()).hold || null
+    infoMsg.value = handHold.value?.running
+      ? '已开启手保持零位：手指被扳动后会自动回到零位'
+      : '已停止手保持零位：手指恢复可被扳动状态'
+  } catch (error) {
+    setError(error)
+  } finally {
+    handHoldBusy.value = false
+  }
+}
+
+function mountCalibrationLabel(item) {
+  const source = item.source === 'hand_eye_2D' ? '2D棋盘格' : '3D点云'
+  const eye = item.eye ? ` · ${item.eye}` : ''
+  const serial = item.serial || '未知相机'
+  const status = item.compatible ? '可用' : '不匹配'
+  return `${status} · ${source}${eye} · ${item.session} · ${serial}`
+}
+
+async function saveMountSelections() {
+  if (!canSaveMount.value) return
+  mountSaveBusy.value = true
+  mountSaveStatus.value = '正在确认点云坐标…'
+  errorMsg.value = ''
+  infoMsg.value = ''
+  try {
+    const paired = mountDrafts.value.filter((item) => item.vertexIndex != null)
+    const savedEpisode = selectedEpisode.value
+    const pairedIdsEarly = new Set(paired.map((item) => item.point_id))
+
+    // 1) 先执行 × 标记的删除（没被新点覆盖的那些）
+    const toDelete = mountSavedForEpisode.value.filter(
+      (item) => mountPendingDeleteIds.value.has(item.point_id) && !pairedIdsEarly.has(item.point_id),
+    )
+    if (toDelete.length) {
+      mountSaveStatus.value = `正在删除 ${toDelete.length} 个实体点…`
+      await Promise.all(toDelete.map(async (item) => {
+        const response = await fetch(`/api/mount/samples/${item.index}`, { method: 'DELETE' })
+        if (!response.ok) throw await responseError(response, `删除 ${item.point_id} 失败`)
+      }))
+      mountPendingDeleteIds.value = new Set()
+    }
+    if (!paired.length) {
+      // 只有删除、没有新点
+      mountResult.value = null
+      overlayVisible.value = false
+      clearOverlay()
+      await refreshMountSamples()
+      refreshHighlights()
+      infoMsg.value = `已删除 ${toDelete.length} 个实体点，本会话共 ${mountSamples.value.length} 条`
+      return
+    }
+    // 实体点单独保存：模型点没标就存 null；若是重选同槽实体点，沿用旧样本里的模型点
+    const previousById = new Map(mountSavedForEpisode.value.map((item) => [item.point_id, item]))
+    const modelFor = (item) => {
+      if (Array.isArray(item.p_hand)) return { p_hand: item.p_hand, p_local: item.p_local, link: item.link }
+      const previous = previousById.get(item.point_id)
+      if (hasModelPoint(previous)) {
+        return { p_hand: previous.p_hand, p_local: previous.p_local ?? null, link: previous.link ?? null }
+      }
+      return { p_hand: null, p_local: null, link: item.link ?? null }
+    }
+    const confirmResponse = await fetch('/api/offline/confirm-mount-points', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        episode: selectedEpisode.value,
+        cloud_id: cloudId.value,
+        stride: cloudStride.value,
+        hand_id: selectedHandId.value,
+        hand_joints: (handModel.value?.actuated_joints || []).map(() => 0),
+        selections: paired.map((item) => ({
+          point_id: item.point_id,
+          label: item.label,
+          ...modelFor(item),
+          vertex_index: item.vertexIndex,
+        })),
+      }),
+    })
+    if (!confirmResponse.ok) throw await responseError(confirmResponse, '安装选点确认失败')
+    const confirmation = await confirmResponse.json()
+
+    // mount API 不提供 replace_existing；对本 episode 同槽重选时先删除旧记录。
+    const pairedIds = new Set(paired.map((item) => item.point_id))
+    const replaced = mountSavedForEpisode.value.filter((item) => pairedIds.has(item.point_id))
+    if (replaced.length) mountSaveStatus.value = '正在替换旧点…'
+    await Promise.all(replaced.map(async (item) => {
+      const response = await fetch(`/api/mount/samples/${item.index}`, { method: 'DELETE' })
+      if (!response.ok) throw await responseError(response, `替换 ${item.point_id} 失败`)
+    }))
+
+    mountSaveStatus.value = '正在写入文件…'
+    let saved
+    let recoveredSamples = null
+    try {
+      const saveResponse = await fetchWithTimeout(
+        '/api/mount/samples/batch',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ observations: confirmation.observations }),
+        },
+        5000,
+      )
+      if (!saveResponse.ok) throw await responseError(saveResponse, '安装样本保存失败')
+      saved = await saveResponse.json()
+    } catch (error) {
+      if (error?.name !== 'AbortError') throw error
+      mountSaveStatus.value = '正在确认后端写入结果…'
+      const checkResponse = await fetchWithTimeout('/api/mount/samples', {}, 3000)
+      if (!checkResponse.ok) throw await responseError(checkResponse, '无法确认保存结果')
+      const check = await checkResponse.json()
+      const matching = (check.samples || []).filter(
+        (item) => item.pose_id === savedEpisode && pairedIds.has(item.point_id),
+      )
+      if (matching.length !== pairedIds.size) {
+        throw new Error('保存请求超时，后端未写入完整数据，请重试')
+      }
+      recoveredSamples = check.samples
+      saved = {
+        saved_count: matching.length,
+        count: Number(check.count) || check.samples.length,
+        indices: matching.map((item) => item.index),
+      }
+    }
+    mountSaveStatus.value = '文件已写入，正在更新界面…'
+    if (recoveredSamples) {
+      mountSamples.value = recoveredSamples
+    } else {
+      const indices = Array.isArray(saved.indices) ? saved.indices : []
+      const savedRecords = confirmation.observations.map((observation, index) => ({
+        ...observation,
+        index: indices[index],
+        datetime: new Date().toISOString(),
+      }))
+      mountSamples.value = [
+        ...mountSamples.value.filter(
+          (item) => !(item.pose_id === savedEpisode && pairedIds.has(item.point_id)),
+        ),
+        ...savedRecords,
+      ].sort((a, b) => Number(a.index) - Number(b.index))
+    }
+    mountSaveBusy.value = false
+    mountSaveStatus.value = ''
+    await nextTick()
+    keepOnlyMountModelPoints()
+    mountResult.value = null
+    overlayVisible.value = false
+    clearOverlay()
+    restoreSavedMountPoints(cloudObject?.geometry)
+    refreshHandPointMarkers()
+    chooseNextMountCloudSlot()
+    refreshHighlights()
+    const missingNow = confirmation.observations.filter((o) => !hasModelPoint(o)).length
+    const deletedNote = toDelete.length ? `，删除 ${toDelete.length} 个` : ''
+    infoMsg.value = missingNow
+      ? `已保存 ${saved.saved_count} 个实体点（其中 ${missingNow} 个还没有模型点，标好模型点后点「写入已保存样本」即可补齐），本会话共 ${saved.count} 条`
+      : `已保存 ${saved.saved_count} 个实体点${deletedNote}，本会话共 ${saved.count} 条`
+  } catch (error) {
+    setError(error)
+  } finally {
+    mountSaveBusy.value = false
+    mountSaveStatus.value = ''
+  }
+}
+
+async function deleteMountSample(index) {
+  try {
+    const response = await fetch(`/api/mount/samples/${index}`, { method: 'DELETE' })
+    if (!response.ok) throw await responseError(response, '安装样本删除失败')
+    mountResult.value = null
+    overlayVisible.value = false
+    clearOverlay()
+    await refreshMountSamples()
+    refreshHighlights()
+    infoMsg.value = '安装样本已删除，可重新采集该槽'
+  } catch (error) {
+    setError(error)
+  }
+}
+
+async function runMountConsistency() {
+  if (!selectedMountCalibPath.value) {
+    errorMsg.value = '请选择一份与当前相机匹配的相机外参'
+    return
+  }
+  mountConsistencyBusy.value = true
+  errorMsg.value = ''
+  infoMsg.value = ''
+  try {
+    const response = await fetch('/api/mount/consistency', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ calib_path: selectedMountCalibPath.value }),
+    })
+    if (!response.ok) throw await responseError(response, '点云一致性检查失败')
+    mountConsistency.value = await response.json()
+    const c = mountConsistency.value
+    const outliers = c.outliers?.length || 0
+    infoMsg.value = c.stats_mm
+      ? `① 一致性：${c.point_count} 张贴纸 · ${c.pose_count} 个姿态 · 跨姿态 RMS ${Number(c.stats_mm.rms).toFixed(2)} mm${outliers ? ` · ${outliers} 个离群观测` : ''}`
+      : `① 一致性：每张贴纸只在 1 个姿态出现，无法评估；多拍几个姿态`
+  } catch (error) {
+    setError(error)
+  } finally {
+    mountConsistencyBusy.value = false
+  }
+}
+
+function toggleMountExcluded(pointId) {
+  const next = new Set(mountExcludedIds.value)
+  if (next.has(pointId)) next.delete(pointId)
+  else next.add(pointId)
+  mountExcludedIds.value = next
+  if (mountResult.value) mountResultStale.value = true
+}
+
+async function jumpToStage1Pose(poseId) {
+  if (!poseId || poseId === selectedEpisode.value) return
+  if (episodes.value.some((e) => e.name === poseId)) await selectEpisode(poseId)
+}
+
+async function solveMount() {
+  if (!selectedMountCalibPath.value) {
+    errorMsg.value = '请选择一份与当前相机匹配的相机外参'
+    return
+  }
+  mountSolveBusy.value = true
+  errorMsg.value = ''
+  infoMsg.value = ''
+  try {
+    const response = await fetch('/api/mount/solve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        calib_path: selectedMountCalibPath.value,
+        exclude_point_ids: [...mountExcludedIds.value],
+      }),
+    })
+    if (!response.ok) throw await responseError(response, '手安装解算失败')
+    mountResult.value = await response.json()
+    mountResultStale.value = false
+    if (mountResult.value.stage1) mountConsistency.value = mountResult.value.stage1
+    const s2 = mountResult.value.stage2?.residual_mm
+    infoMsg.value = `② 解算完成：${mountResult.value.point_count} 张贴纸参与，逐贴纸 RMS ${Number(s2?.rms).toFixed(2)} mm（最大 ${Number(s2?.max).toFixed(2)} mm）`
+    clearOverlay()
+    if (overlayVisible.value) buildOverlay()
+    await nextTick()
+    mountResultCard.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  } catch (error) {
+    setError(error)
+  } finally {
+    mountSolveBusy.value = false
+  }
+}
+
+function ensureOverlayGroup() {
+  if (overlayGroup || !scene) return
+  overlayGroup = new THREE.Group()
+  overlayGroup.matrixAutoUpdate = false
+  scene.add(overlayGroup)
+}
+
+function clearOverlay() {
+  if (!overlayGroup) return
+  clearGroup(overlayGroup)
+  overlayGroup.visible = false
+}
+
+function buildOverlay() {
+  if (!handMeshGroup?.children.length || !overlayAvailable.value) return
+  ensureOverlayGroup()
+  clearGroup(overlayGroup)
+  for (const source of handMeshGroup.children) {
+    const mesh = new THREE.Mesh(
+      source.geometry,
+      new THREE.MeshBasicMaterial({
+        color: 0x38d996,
+        transparent: true,
+        opacity: 0.42,
+        depthWrite: false,
+      }),
+    )
+    mesh.matrixAutoUpdate = false
+    mesh.matrix.copy(source.matrix)
+    overlayGroup.add(mesh)
+  }
+  updateOverlay()
+}
+
+function updateOverlay() {
+  if (!overlayGroup) return
+  const rows = mountResult.value?.per_pose_overlay_T_camera_hand?.[selectedEpisode.value]
+  overlayGroup.visible = Boolean(rows && overlayVisible.value)
+  if (rows) overlayGroup.matrix.copy(matrixFromRows(rows))
+}
+
+function toggleOverlay() {
+  overlayVisible.value = !overlayVisible.value
+  if (overlayVisible.value && overlayAvailable.value && !overlayGroup?.children.length) {
+    buildOverlay()
+  }
+  if (overlayVisible.value && !overlayAvailable.value) {
+    infoMsg.value = '当前 episode 未参与本次解算，没有模型叠加位姿'
+  }
+  updateOverlay()
+}
+
+function formatMatrixValue(value) {
+  return Number(value).toFixed(6)
+}
+
+async function setMode(nextMode) {
+  if (mode.value === nextMode) return
+  mode.value = nextMode
+  if (nextMode === 'mount') mountViewport.value = 'model'
+  refreshHighlights()
+  if (nextMode !== 'mount') {
+    if (overlayGroup) overlayGroup.visible = false
+    return
+  }
+  await enterMountMode()
+}
+
+// 手安装模式的初始化：手型号目录、模型点方案、样本、解算结果。
+// 默认模式就是 mount，所以页面打开时也要跑一遍，不能只靠 setMode 切换触发。
+async function enterMountMode() {
+  await nextTick()
+  initHandViewer()
+  resizeHandViewer()
+  try {
+    if (!mountSamples.value.length) await refreshMountSamples()
+    if (!hands.value.length) await loadHandsCatalog()
+    if (selectedHandId.value && !handModel.value) await loadHandModel()
+    await Promise.all([
+      refreshMountProfiles(selectedHandId.value),
+      refreshMountCalibrations(),
+      refreshMountResult(),
+      refreshHandHold(),
+    ])
+    restoreSavedMountPoints(cloudObject?.geometry)
+    refreshHighlights()
+  } catch (error) {
+    setError(error)
+  }
+}
+
+async function loadWorkspace() {
+  errorMsg.value = ''
+  infoMsg.value = ''
+  try {
+    const [statusResponse, episodesResponse, colorsResponse, samplesResponse] = await Promise.all([
+      fetch('/api/status'),
+      fetch('/api/offline/episodes'),
+      fetch('/api/markers/colors'),
+      fetch('/api/samples'),
+    ])
+    for (const [response, label] of [
+      [statusResponse, '状态加载失败'],
+      [episodesResponse, 'episode 加载失败'],
+      [colorsResponse, 'marker 颜色加载失败'],
+      [samplesResponse, '样本加载失败'],
+    ]) {
+      if (!response.ok) throw await responseError(response, label)
+    }
+    const [statusData, episodeData, colorData, sampleData] = await Promise.all([
+      statusResponse.json(),
+      episodesResponse.json(),
+      colorsResponse.json(),
+      samplesResponse.json(),
+    ])
+    if (!statusData.offline?.enabled) {
+      throw new Error('后端未配置可读取的 episode 目录')
+    }
+    status.value = statusData
+    episodes.value = episodeData.episodes || []
+    markerColors.value = colorData.colors || []
+    samples.value = sampleData.samples || []
+    if (!episodes.value.some((item) => item.name === selectedEpisode.value)) {
+      selectedEpisode.value = episodes.value[0]?.name || ''
+    }
+    activeColor.value = episodeSamples.value[0]?.color || selectableColors.value[0]?.color || ''
+    if (!episodes.value.length) {
+      infoMsg.value = '暂无 episode，请先在 7012 按 C 采集当前姿态，再点此页面的刷新按钮。'
+    }
+  } catch (error) {
+    setError(error)
+  }
+}
+
+async function loadEpisodeTasks() {
+  if (!status.value?.offline?.task_selectable) return
+  try {
+    const response = await fetch('/api/offline/tasks')
+    if (!response.ok) throw await responseError(response, '任务目录列表加载失败')
+    const data = await response.json()
+    episodeTasks.value = data.tasks || []
+  } catch (error) {
+    setError(error)
+  }
+}
+
+function taskLabel(task) {
+  const arm = task.arm ? ARM_LABEL[task.arm] || task.arm : '手臂未知'
+  const parent = task.path.split('/').slice(-2, -1)[0] || ''
+  const shown = ['left', 'right'].includes(parent) ? task.name : `${parent}/${task.name}`
+  const when = new Date(task.mtime * 1000).toLocaleString('zh-CN', {
+    hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+  })
+  return `${arm} · ${shown} · ${task.episode_count} 组 · ${when}`
+}
+
+async function switchEpisodeTask(path) {
+  if (!path || taskSwitchBusy.value || cloudBusy.value) return
+  if (path === status.value?.offline?.task_dir) return
+  taskSwitchBusy.value = true
+  errorMsg.value = ''
+  try {
+    const response = await fetch('/api/offline/task', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path }),
+    })
+    if (!response.ok) throw await responseError(response, '切换任务目录失败')
+    // 手臂、样本目录都随任务切换：整个工作区重新加载
+    selectedEpisode.value = ''
+    await loadWorkspace()
+    await loadEpisodeTasks()
+    if (selectedEpisode.value) {
+      await nextTick()
+      await loadPointCloud()
+      refreshHandPointMarkers()
+      updateOverlay()
+    }
+    infoMsg.value = `已切换到 ${status.value?.offline?.task_dir}（${ARM_LABEL[status.value?.arm] || status.value?.arm}）`
+  } catch (error) {
+    setError(error)
+  } finally {
+    taskSwitchBusy.value = false
+  }
+}
+
+async function selectEpisode(name) {
+  if (name === selectedEpisode.value || cloudBusy.value) return
+  selectedEpisode.value = name
+  activeColor.value = episodeSamples.value[0]?.color || selectableColors.value[0]?.color || ''
+  await nextTick()
+  await loadPointCloud()
+  refreshHandPointMarkers()
+  updateOverlay()
+}
+
+async function confirmAndSave() {
+  if (!canSave.value) return
+  saveBusy.value = true
+  errorMsg.value = ''
+  infoMsg.value = ''
+  try {
+    if (!selections.value.length) {
+      const deleteResponse = await fetch(
+        `/api/samples/by-episode/${encodeURIComponent(selectedEpisode.value)}`,
+        { method: 'DELETE' },
+      )
+      if (!deleteResponse.ok) {
+        throw await responseError(deleteResponse, '清空已保存观测失败')
+      }
+      const deleted = await deleteResponse.json()
+      await loadWorkspace()
+      activeColor.value = selectableColors.value[0]?.color || ''
+      infoMsg.value = `已清空 ${selectedEpisode.value} 的 ${deleted.deleted_count || 0} 个观测`
+      return
+    }
+
+    const confirmResponse = await fetch('/api/offline/confirm-points', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        episode: selectedEpisode.value,
+        cloud_id: cloudId.value,
+        stride: cloudStride.value,
+        selections: selections.value.map((item) => ({
+          id: `marker-${item.color}`,
+          color: item.color,
+          vertex_index: item.vertexIndex,
+        })),
+      }),
+    })
+    if (!confirmResponse.ok) {
+      throw await responseError(confirmResponse, '点云选点确认失败')
+    }
+    const confirmation = await confirmResponse.json()
+    const saveResponse = await fetch('/api/samples/batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        episode: selectedEpisode.value,
+        observations: confirmation.observations,
+        replace_existing: true,
+      }),
+    })
+    if (!saveResponse.ok) throw await responseError(saveResponse, '样本保存失败')
+    const saved = await saveResponse.json()
+    await loadWorkspace()
+    if (cloudObject) restoreSavedSelections(cloudObject.geometry)
+    infoMsg.value = saved.updated_count
+      ? `已更新 ${saved.updated_count} 个点云观测`
+      : `已保存 ${saved.indices?.length || selections.value.length} 个点云观测`
+  } catch (error) {
+    setError(error)
+  } finally {
+    saveBusy.value = false
+  }
+}
+
+async function solve() {
+  solveBusy.value = true
+  errorMsg.value = ''
+  infoMsg.value = ''
+  try {
+    const response = await fetch('/api/solve', { method: 'POST' })
+    if (!response.ok) throw await responseError(response, '解算失败')
+    solveResult.value = await response.json()
+    infoMsg.value = '联合解算完成'
+  } catch (error) {
+    setError(error)
+  } finally {
+    solveBusy.value = false
+  }
+}
+
+watch(pointSize, (value) => {
+  if (cloudMaterial) cloudMaterial.size = value / 1000
+})
+
+watch(cloudStride, async (value, oldValue) => {
+  if (value !== oldValue && selectedEpisode.value && renderer) await loadPointCloud()
+})
+
+watch(selectedHandId, async (value, oldValue) => {
+  if (value && value !== oldValue && mode.value === 'mount' && handRenderer) {
+    mountViewport.value = 'model'
+    mountProfiles.value = []
+    selectedMountProfileId.value = ''
+    await loadHandModel()
+    await refreshMountProfiles(value)
+  }
+})
+
+watch(mountViewport, async () => {
+  await nextTick()
+  resizeViewer()
+  resizeHandViewer()
+})
+
+onMounted(async () => {
+  initViewer()
+  handHoldTimer = window.setInterval(() => {
+    if (mode.value === 'mount') refreshHandHold()
+  }, 5000)
+  await loadWorkspace()
+  await loadEpisodeTasks()
+  if (mode.value === 'mount') await enterMountMode()
+  if (selectedEpisode.value) await loadPointCloud()
+})
+
+onBeforeUnmount(() => {
+  requestSerial += 1
+  handLoadSerial += 1
+  if (handHoldTimer !== null) window.clearInterval(handHoldTimer)
+  resizeObserver?.disconnect()
+  handResizeObserver?.disconnect()
+  if (renderer) {
+    renderer.setAnimationLoop(null)
+    renderer.domElement.removeEventListener('pointerdown', onPointerDown)
+    renderer.domElement.removeEventListener('pointerup', onPointerUp)
+    renderer.dispose()
+  }
+  controls?.dispose()
+  if (handRenderer) {
+    handRenderer.setAnimationLoop(null)
+    handRenderer.domElement.removeEventListener('pointerdown', onHandPointerDown)
+    handRenderer.domElement.removeEventListener('pointerup', onHandPointerUp)
+    handRenderer.dispose()
+  }
+  handControls?.dispose()
+  clearGroup(handMeshGroup)
+  clearGroup(handPointGroup, true)
+  clearOverlay()
+  for (const geometryPromise of stlCache.values()) {
+    geometryPromise.then((geometry) => geometry.dispose()).catch(() => {})
+  }
+  disposeCloud()
+})
+</script>
+
+<template>
+  <main class="app-shell">
+    <header class="topbar">
+      <div>
+        <h1>Hand-Eye 3D · 点云选点</h1>
+        <p>已落盘 episode · 相机系 X 右 / Y 下 / Z 前 · 单位 m</p>
+      </div>
+      <div class="topbar-status">
+        <span class="status-dot" :class="{ ready: status?.offline?.enabled }"></span>
+        {{
+          status?.offline?.enabled
+            ? (status.mode === 'live' ? '实时采集 + episode 读取已连接' : '纯离线后端已连接')
+            : '等待 episode 后端'
+        }}
+        <span v-if="status?.arm" class="arm-badge" :class="status.arm">
+          {{ ARM_LABEL[status.arm] || status.arm }}
+        </span>
+        <a :href="imageFrontendUrl">打开 7012 图像版</a>
+      </div>
+    </header>
+
+    <section class="workspace">
+      <aside class="episode-panel">
+        <div class="panel-heading">
+          <div>
+            <h2>采集姿态</h2>
+            <span>{{ episodes.length }} episodes</span>
+          </div>
+          <button class="icon-button" title="刷新" @click="loadWorkspace(); loadEpisodeTasks()">↻</button>
+        </div>
+        <label v-if="status?.offline?.task_selectable" class="task-picker" title="选择要解算的那次采集：7012 手动拍摄目录或回放服务的每次运行。手臂按目录内 episode 自动判断，样本/结果目录随之切换">
+          <span>任务目录（选哪次采集）</span>
+          <select
+            :value="status?.offline?.task_dir || ''"
+            :disabled="taskSwitchBusy || cloudBusy"
+            @change="switchEpisodeTask($event.target.value)"
+          >
+            <option
+              v-if="!episodeTasks.some((task) => task.path === status?.offline?.task_dir)"
+              :value="status?.offline?.task_dir || ''"
+            >
+              {{ status?.offline?.task_dir || '（未选择）' }}
+            </option>
+            <option v-for="task in episodeTasks" :key="task.path" :value="task.path" :disabled="!!task.error">
+              {{ task.error ? `⚠ ${task.name}：左右臂混杂` : taskLabel(task) }}
+            </option>
+          </select>
+          <small>{{ taskSwitchBusy ? '切换中…' : (status?.offline?.task_dir || '') }}</small>
+        </label>
+        <div class="episode-list" :class="{ 'with-picker': status?.offline?.task_selectable }">
+          <button
+            v-for="episode in episodes"
+            :key="episode.name"
+            class="episode-item"
+            :class="{ active: episode.name === selectedEpisode }"
+            :disabled="cloudBusy"
+            @click="selectEpisode(episode.name)"
+          >
+            <span>{{ episode.name }}</span>
+            <small v-if="mode === 'mount'">
+              实体点已保存 {{ mountSavedCountsByEpisode[episode.name] || 0 }}/{{ mountSlots.length }}
+            </small>
+            <small v-else>
+              颜色点已保存 {{ episode.imported_marker_count || 0 }}
+            </small>
+            <small v-if="episode.warnings?.length" class="episode-warning">
+              ⚠ {{ episode.warnings[0] }}
+            </small>
+          </button>
+          <p v-if="!episodes.length" class="empty-state">
+            暂无 episode。请先在 7012 按 C 采集当前姿态，再点击上方刷新。
+          </p>
+        </div>
+      </aside>
+
+      <section class="viewer-column">
+        <div class="viewer-toolbar">
+          <div class="viewer-title">
+            <strong>
+              {{
+                mode === 'mount' && mountViewport === 'model'
+                  ? (currentHand?.label || '零位灵巧手模型')
+                  : (selectedEpisode || '未选择 episode')
+              }}
+            </strong>
+            <span v-if="mode === 'mount' && mountViewport === 'model'">
+              {{ handModel?.base_link || '等待模型' }} · 六个手关节全零
+            </span>
+            <span v-else-if="pointCount">{{ pointCount.toLocaleString() }} points</span>
+          </div>
+          <div v-if="mode === 'mount'" class="viewport-tabs">
+            <button
+              :class="{ active: mountViewport === 'model' }"
+              @click="mountViewport = 'model'"
+            >
+              零位手模型
+            </button>
+            <button
+              :class="{ active: mountViewport === 'cloud' }"
+              :disabled="!selectedEpisode"
+              title="查看当前 episode 的实体点云（模型点与实体点可任意先后标注，保存时配对）"
+              @click="mountViewport = 'cloud'"
+            >
+              实体点云
+            </button>
+          </div>
+          <template v-if="mode === 'marker' || mountViewport === 'cloud'">
+            <label>
+              点大小
+              <input v-model.number="pointSize" type="range" min="1" max="12" step="1" />
+            </label>
+            <label>
+              采样
+              <select v-model.number="cloudStride" :disabled="cloudBusy">
+                <option :value="1">1× 精细</option>
+                <option :value="2">2× 默认</option>
+                <option :value="3">3× 流畅</option>
+                <option :value="4">4× 快速</option>
+              </select>
+            </label>
+            <button class="secondary-button" :disabled="cloudBusy || !selectedEpisode" @click="loadPointCloud">
+              重新加载
+            </button>
+          </template>
+        </div>
+        <div
+          v-show="mode === 'marker' || mountViewport === 'cloud'"
+          ref="viewerHost"
+          class="viewer"
+        >
+          <div v-if="cloudBusy" class="viewer-overlay">
+            <span class="spinner"></span>
+            正在对齐五帧深度并生成点云…
+          </div>
+          <div class="axis-legend">
+            <span class="x">X 右</span>
+            <span class="y">Y 下</span>
+            <span class="z">Z 前</span>
+          </div>
+          <div class="viewer-help">
+            {{
+              mode === 'mount'
+                ? `当前 ${activeMountSlot?.label || '未选槽位'} · 单击对应实体点`
+                : '单击选点'
+            }}
+            · 左键拖动旋转 · 右键平移 · 滚轮缩放
+          </div>
+          <div
+            v-if="mode === 'mount' && lastMountSelectedPoint"
+            class="selected-point-readout"
+          >
+            <span>
+              最近选择：{{ mountSlotInfo(lastMountSelectedPoint.point_id).shortLabel }}
+              · vertex #{{ lastMountSelectedPoint.vertexIndex }}
+              · {{ lastMountSelectedPoint.point.map((value) => Number(value).toFixed(4)).join(', ') }}
+            </span>
+            <button @click="clearMountSlotCloudPoint(lastMountSelectedPoint.point_id)">
+              删除该点
+            </button>
+          </div>
+        </div>
+        <div
+          v-show="mode === 'mount' && mountViewport === 'model'"
+          ref="handViewerHost"
+          class="viewer hand-main-viewer"
+        >
+          <div v-if="handBusy" class="viewer-overlay">
+            <span class="spinner"></span>
+            正在加载手模型…
+          </div>
+          <div class="axis-legend">
+            <span class="x">X</span>
+            <span class="y">Y</span>
+            <span class="z">Z</span>
+          </div>
+          <div class="viewer-help">
+            当前 {{ activeMountSlot?.label }} · 单击模型贴点位置 · 左键旋转 · 右键平移 · 滚轮缩放
+          </div>
+        </div>
+        <div v-if="errorMsg" class="message error">{{ errorMsg }}</div>
+        <div v-else-if="infoMsg" class="message success">{{ infoMsg }}</div>
+      </section>
+
+      <aside class="selection-panel">
+        <div class="mode-tabs">
+          <button :class="{ active: mode === 'marker' }" @click="setMode('marker')">
+            Marker 标定
+          </button>
+          <button :class="{ active: mode === 'mount' }" @click="setMode('mount')">
+            手安装标定
+          </button>
+        </div>
+
+        <template v-if="mode === 'mount'">
+          <section class="side-card">
+            <div class="panel-heading compact">
+              <div>
+                <h2>1. 选择零位手模型</h2>
+                <span>模型显示在中央大视区 · mesh 表面可点击</span>
+              </div>
+              <span class="zero-badge">6 DOF = 0</span>
+            </div>
+            <select v-model="selectedHandId" class="hand-select" :disabled="handBusy">
+              <option v-for="hand in hands" :key="hand.hand_id" :value="hand.hand_id">
+                {{ hand.label }}（{{ hand.side === 'left' ? '左手' : '右手' }}）
+              </option>
+            </select>
+            <p class="model-meta">
+              {{ currentHand?.vendor || '—' }} · {{ handModel?.base_link || '等待模型' }}
+            </p>
+            <button class="secondary-button model-focus-button" @click="mountViewport = 'model'">
+              在中央查看并选择模型点
+            </button>
+            <div class="hand-hold-row">
+              <button
+                class="secondary-button hand-hold-button"
+                :class="{ holding: handHold?.running }"
+                :disabled="handHoldBusy || (!handHold?.running && !selectedHandId)"
+                @click="toggleHandHold"
+              >
+                {{
+                  handHoldBusy
+                    ? '处理中…'
+                    : (handHold?.running ? '停止手保持零位' : '开启手保持零位（18089）')
+                }}
+              </button>
+              <small class="hand-hold-status" :class="handHoldSummary.tone">
+                {{ handHoldSummary.text }}
+              </small>
+            </div>
+          </section>
+
+          <section class="side-card mount-profile-card">
+            <div class="panel-heading compact">
+              <div>
+                <h2>2. 模型点方案</h2>
+                <span>标注任意数量即可保存草稿 · 重启后继续</span>
+              </div>
+              <span v-if="mountProfileDirty" class="profile-dirty">未保存修改</span>
+            </div>
+            <div class="profile-save-row">
+              <input
+                v-model="mountProfileName"
+                maxlength="128"
+                placeholder="输入方案名称"
+                :disabled="mountProfileBusy"
+              />
+              <button
+                class="primary-button"
+                :disabled="!canSaveMountProfile"
+                @click="saveMountProfile"
+              >
+                {{ mountProfileBusy ? '处理中…' : '保存/覆盖' }}
+              </button>
+            </div>
+            <div class="profile-load-row">
+              <select
+                v-model="selectedMountProfileId"
+                :disabled="mountProfileBusy || !mountProfiles.length"
+                @change="selectMountProfile"
+              >
+                <option value="">选择已有方案</option>
+                <option
+                  v-for="profile in mountProfiles"
+                  :key="profile.profile_id"
+                  :value="profile.profile_id"
+                >
+                  {{ profile.name }}（{{ profile.point_count ?? profile.points?.length ?? 0 }}/{{ mountSlots.length }}）
+                </option>
+              </select>
+              <button
+                class="secondary-button"
+                :disabled="!selectedMountProfileId || mountProfileBusy"
+                @click="loadMountProfile"
+              >
+                加载
+              </button>
+              <button
+                class="text-button"
+                :disabled="!selectedMountProfileId || mountProfileBusy"
+                @click="deleteMountProfile"
+              >
+                删除
+              </button>
+            </div>
+            <p class="model-meta">
+              {{
+                loadedMountProfileId
+                  ? `当前已加载：${mountProfileName}`
+                  : `${mountProfiles.length} 个可用方案`
+              }}
+            </p>
+          </section>
+
+          <section class="side-card mount-slots-card">
+            <div class="panel-heading compact">
+              <div>
+                <h2>3. 手模型上的模型点（红 8 · 绿 8 · 黄 2 · 粉 2）</h2>
+                <span>
+                  已完成 {{ mountDraftIds.size }}/{{ mountSlots.length }} · 只标你信任的点即可 · 与实体点无先后顺序，保存时按槽位配对
+                </span>
+              </div>
+            </div>
+            <div v-for="group in mountSlotGroups" :key="group.side" class="mount-slot-section">
+              <strong>{{ group.title }}</strong>
+              <div class="mount-slot-grid">
+                <div
+                  v-for="slot in group.slots"
+                  :key="slot.point_id"
+                  class="mount-slot-wrap"
+                >
+                  <button
+                    class="mount-slot"
+                    :class="{
+                      active: activeMountSlotId === slot.point_id,
+                      modeled: mountDraftIds.has(slot.point_id),
+                      paired: mountPairedIds.has(slot.point_id),
+                      'cloud-only': mountCloudOnlyIds.has(slot.point_id),
+                      saved: mountSavedIds.has(slot.point_id),
+                    }"
+                    :title="`${slot.label}（${slot.point_id}）`"
+                    @click="activateMountSlot(slot.point_id)"
+                  >
+                    <i :style="{ background: slot.color }"></i>
+                    <span>{{ slot.shortLabel }}</span>
+                    <small v-if="mountPendingDeleteIds.has(slot.point_id) && !mountCloudPickedIds.has(slot.point_id)" class="pending-delete">待删除</small>
+                    <small v-else-if="mountPairedIds.has(slot.point_id)">待保存</small>
+                    <small v-else-if="mountCloudOnlyIds.has(slot.point_id)" class="missing-model">待保存·缺模型点</small>
+                    <small v-else-if="mountSavedMissingModelIds.has(slot.point_id)" class="missing-model">已保存·缺模型点</small>
+                    <small v-else-if="mountSavedIds.has(slot.point_id)">已保存</small>
+                    <small v-else-if="mountDraftIds.has(slot.point_id)">
+                      {{ mountViewport === 'cloud' ? '点云待选' : '模型已选' }}
+                    </small>
+                    <small v-else>模型待选</small>
+                  </button>
+                  <button
+                    v-if="mountCloudPickedIds.has(slot.point_id) || mountSavedIds.has(slot.point_id)"
+                    class="mount-slot-clear"
+                    :class="{ armed: mountPendingDeleteIds.has(slot.point_id) }"
+                    :title="mountCloudPickedIds.has(slot.point_id)
+                      ? `撤销 ${slot.shortLabel} 的待保存实体点`
+                      : (mountPendingDeleteIds.has(slot.point_id) ? `取消删除 ${slot.shortLabel}` : `标记删除 ${slot.shortLabel} 的实体点（点保存后生效）`)"
+                    @click.stop="clearMountSlotCloudPoint(slot.point_id)"
+                  >
+                    ×
+                  </button>
+                </div>
+              </div>
+            </div>
+            <p class="armed-hint">
+              当前：<strong>{{ activeMountSlot?.label }}</strong>
+              <template v-if="mountViewport === 'model'">
+                → 请在手模型上点击此点
+              </template>
+              <template v-else>→ 请在点云点击对应实体点</template>
+            </p>
+            <div class="mount-stage-actions">
+              <button
+                v-if="mountViewport === 'cloud'"
+                class="primary-button"
+                @click="mountViewport = 'model'"
+              >
+                去零位手模型选理论点
+              </button>
+              <button
+                v-else
+                class="primary-button"
+                :disabled="!selectedEpisode"
+                @click="mountViewport = 'cloud'"
+              >
+                去点云选实体点
+              </button>
+              <button
+                v-if="mountViewport === 'model'"
+                class="secondary-button"
+                :disabled="!canApplyModelPoints"
+                :title="mountSamplesApplicable ? `把当前模型点写入 ${mountSamplesApplicable} 条已保存样本` : '没有可更新的已保存样本'"
+                @click="applyModelPoints"
+              >
+                {{ mountProfileBusy ? '写入中…' : `写入已保存样本（${mountSamplesApplicable}）` }}
+              </button>
+              <button
+                class="text-button"
+                :disabled="!mountDraftIds.size"
+                @click="clearMountDrafts"
+              >
+                清空模型点
+              </button>
+            </div>
+          </section>
+
+          <section class="side-card">
+            <div class="panel-heading compact">
+              <div>
+                <h2>4. 当前 episode 实体点</h2>
+                <span>
+                  {{ mountCloudPickedIds.size }} 个待保存 · {{ mountSavedForEpisode.length }} 个已保存<template v-if="mountPendingDeleteIds.size"> · {{ mountPendingDeleteIds.size }} 个待删除</template>
+                  <template v-if="mountSavedMissingModelIds.size"> · 已保存中 {{ mountSavedMissingModelIds.size }} 个缺模型点</template>
+                </span>
+              </div>
+              <button
+                class="text-button"
+                :disabled="!mountCloudPickedIds.size"
+                @click="clearMountCloudSelections"
+              >
+                清空待保存点
+              </button>
+            </div>
+            <button class="primary-button" :disabled="!canSaveMount" @click="saveMountSelections">
+              {{
+                mountSaveBusy
+                  ? mountSaveStatus
+                  : (mountPendingDeleteIds.size
+                    ? `保存修改（新增/替换 ${mountCloudPickedIds.size} · 删除 ${mountPendingDeleteIds.size}）`
+                    : `保存当前所选 ${mountCloudPickedIds.size} 个点云点`)
+              }}
+            </button>
+            <p class="mount-save-hint">
+              点云点可单独保存，选 1 个即可，无需凑齐。
+              <template v-if="mountCloudOnlyIds.size">其中 {{ mountCloudOnlyIds.size }} 个还没有模型点，会先按"缺模型点"保存；到「零位手模型」标好后点「写入已保存样本」补齐。</template>
+            </p>
+          </section>
+
+          <section class="side-card mount-samples-card">
+            <div class="panel-heading compact">
+              <div>
+                <h2>5. 安装样本与解算</h2>
+                <span>
+                  {{ mountSamples.length }} 条样本 · {{ mountSamplesByPose }} 个姿态
+                  <template v-if="mountSamplesMissingModel"> · <b class="missing-model">{{ mountSamplesMissingModel }} 条缺模型点（解算跳过）</b></template>
+                </span>
+              </div>
+            </div>
+            <div class="mount-calib-picker">
+              <label for="mount-calibration">相机外参</label>
+              <div>
+                <select
+                  id="mount-calibration"
+                  v-model="selectedMountCalibPath"
+                  :disabled="mountCalibBusy"
+                >
+                  <option value="">请选择与当前相机匹配的外参</option>
+                  <option
+                    v-for="item in mountCalibrations"
+                    :key="item.path"
+                    :value="item.path"
+                    :disabled="!item.compatible"
+                  >
+                    {{ mountCalibrationLabel(item) }}
+                  </option>
+                </select>
+                <button
+                  class="secondary-button"
+                  :disabled="mountCalibBusy"
+                  @click="refreshMountCalibrations"
+                >
+                  {{ mountCalibBusy ? '加载中…' : '刷新' }}
+                </button>
+              </div>
+              <small v-if="selectedMountCalibration">
+                已选择：{{ selectedMountCalibration.path }}
+              </small>
+              <small v-else-if="mountCalibrations.length">
+                没有可用外参；下拉列表中的“不匹配”文件不可用于解算。
+              </small>
+            </div>
+            <div v-if="mountSavedForEpisode.length" class="mount-sample-list">
+              <div
+                v-for="sample in mountSavedForEpisode"
+                :key="sample.index"
+                class="mount-sample-row"
+              >
+                <i :style="{ background: mountSlotInfo(sample.point_id).color }"></i>
+                <span>{{ sample.label || mountSlotInfo(sample.point_id).label }}</span>
+                <small>#{{ sample.index }}</small>
+                <button
+                  class="mini-delete"
+                  :title="`删除 ${sample.point_id}`"
+                  @click="deleteMountSample(sample.index)"
+                >×</button>
+              </div>
+            </div>
+            <p v-else class="episode-sample-hint">当前 episode 尚无已保存安装样本</p>
+
+            <div class="stage-block">
+              <div class="stage-head">
+                <b>① 点云一致性</b>
+                <small>只用实体点，不需要模型点。同一贴纸在各姿态搬到腕系后应重合；离散度 = 外参 + FK + 选点误差</small>
+              </div>
+              <button
+                class="secondary-button"
+                :disabled="mountConsistencyBusy || !mountSamples.length || !selectedMountCalibPath"
+                @click="runMountConsistency"
+              >
+                {{ mountConsistencyBusy ? '检查中…' : '运行一致性检查' }}
+              </button>
+              <div v-if="mountStage1Summary" class="result-summary">
+                <div><span>跨姿态 RMS</span><strong>{{ mountStage1Summary.rms }} mm</strong></div>
+                <div><span>最大偏差</span><strong>{{ mountStage1Summary.max }} mm</strong></div>
+                <div><span>观测</span><strong>{{ mountStage1Summary.count }}</strong></div>
+              </div>
+              <ul v-if="mountStage1Outliers.length" class="outlier-list">
+                <li v-for="o in mountStage1Outliers" :key="o.point_id + o.pose_id">
+                  <i :style="{ background: mountSlotInfo(o.point_id).color }"></i>
+                  {{ mountSlotInfo(o.point_id).shortLabel }} @
+                  <a href="#" @click.prevent="jumpToStage1Pose(o.pose_id)">{{ o.pose_id }}</a>
+                  偏 {{ Number(o.deviation_mm).toFixed(1) }} mm，已从均值剔除
+                </li>
+              </ul>
+            </div>
+
+            <div v-if="mountStagePoints.length" class="stage-table">
+              <div class="stage-row head">
+                <span>参与②</span><span>贴纸</span><span>姿态数</span><span>①离散 RMS</span><span>②残差</span>
+              </div>
+              <label
+                v-for="p in mountStagePoints"
+                :key="p.point_id"
+                class="stage-row"
+                :class="{ excluded: p.excluded, 'no-model': !p.has_model_point }"
+                :title="p.has_model_point ? '' : '缺模型点，只参与①'"
+              >
+                <span>
+                  <input
+                    type="checkbox"
+                    :checked="p.has_model_point && !p.excluded"
+                    :disabled="!p.has_model_point"
+                    @change="toggleMountExcluded(p.point_id)"
+                  />
+                </span>
+                <span><i :style="{ background: p.slot.color }"></i>{{ p.slot.shortLabel }}</span>
+                <span>{{ p.used_pose_count ?? p.pose_count }}<template v-if="p.used_pose_count != null && p.used_pose_count !== p.pose_count">/{{ p.pose_count }}</template></span>
+                <span>{{ p.spread_mm ? Number(p.spread_mm.rms).toFixed(2) : '—' }}</span>
+                <span>
+                  <template v-if="!p.has_model_point">缺模型点</template>
+                  <template v-else-if="p.excluded">已排除</template>
+                  <template v-else-if="p.stage2">{{ Number(p.stage2.residual_mm).toFixed(2) }}</template>
+                  <template v-else>—</template>
+                </span>
+              </label>
+            </div>
+
+            <div class="stage-block">
+              <div class="stage-head">
+                <b>② 安装解算</b>
+                <small>每张贴纸取①的均值，与模型点做 Kabsch 求 T_wrist2hand；残差 = 贴纸位置 vs 模型标注偏差。取消勾选即排除不信任的贴纸</small>
+              </div>
+              <button
+                class="solve-button"
+                :disabled="
+                  mountSolveBusy
+                  || mountSamples.length < mountMinPoints
+                  || !selectedMountCalibPath
+                "
+                @click="solveMount"
+              >
+                {{ mountSolveBusy ? '解算中…' : `解算并显示结果（${mountStagePoints.length ? `${mountStage2Eligible} 张贴纸参与，` : ''}至少 ${mountMinPoints}）` }}
+              </button>
+              <div v-if="mountStage2Summary" class="result-summary">
+                <div><span>逐贴纸 RMS</span><strong>{{ mountStage2Summary.rms }} mm</strong></div>
+                <div><span>中位</span><strong>{{ mountStage2Summary.median }} mm</strong></div>
+                <div><span>最大</span><strong>{{ mountStage2Summary.max }} mm</strong></div>
+              </div>
+            </div>
+            <button
+              v-if="mountResult"
+              class="secondary-button overlay-toggle"
+              :disabled="!overlayAvailable"
+              @click="toggleOverlay"
+            >
+              {{ overlayVisible ? '隐藏' : '显示' }}当前姿态模型叠加
+            </button>
+          </section>
+
+          <section
+            v-if="mountResult"
+            ref="mountResultCard"
+            class="side-card mount-result-card"
+          >
+            <div class="mount-result-heading">
+              <div>
+                <h2>安装标定结果</h2>
+                <span>
+                  {{ mountResult.num_samples }} 个观测 ·
+                  {{ mountResult.pose_count }} 个姿态 ·
+                  {{ mountResult.point_count }} 张贴纸<template v-if="mountResult.excluded_point_ids?.length">（排除 {{ mountResult.excluded_point_ids.length }}）</template>
+                </span>
+              </div>
+              <strong
+                v-if="mountQualitySummary"
+                class="quality-badge"
+                :class="mountQualitySummary.tone"
+              >
+                {{ mountQualitySummary.label }}
+              </strong>
+            </div>
+            <a
+              class="mount-diagnostics-link"
+              :href="mountDiagnosticsFrontendUrl"
+              target="_blank"
+              rel="noreferrer"
+            >
+              在 7015 查看点序、对应连线与逐姿态误差
+            </a>
+            <p
+              v-if="mountQualitySummary"
+              class="quality-message"
+              :class="mountQualitySummary.tone"
+            >
+              {{ mountQualitySummary.message }}
+            </p>
+            <div class="mount-result-metrics">
+              <div v-if="mountStage1Summary"><span>① 跨姿态 RMS</span><strong>{{ mountStage1Summary.rms }} mm</strong></div>
+              <div v-if="mountStage2Summary"><span>② 逐贴纸 RMS</span><strong>{{ mountStage2Summary.rms }} mm</strong></div>
+              <div><span>逐观测 RMS</span><strong>{{ mountResidualSummary.rms }} mm</strong></div>
+              <div><span>中位误差</span><strong>{{ mountResidualSummary.median }} mm</strong></div>
+              <div><span>最大误差</span><strong>{{ mountResidualSummary.max }} mm</strong></div>
+              <div v-if="mountLooSummary">
+                <span>跨姿态 RMS</span><strong>{{ mountLooSummary.rms }} mm</strong>
+              </div>
+              <div v-if="mountLooSummary">
+                <span>跨姿态 P95</span><strong>{{ mountLooSummary.p95 }} mm</strong>
+              </div>
+              <div>
+                <span>退化指标</span><strong>{{ Number(mountResult.collinearity).toFixed(3) }}</strong>
+              </div>
+            </div>
+            <div v-if="mountTransformSummary" class="transform-summary">
+              <div>
+                <span>安装平移 XYZ（mm）</span>
+                <code>{{ mountTransformSummary.translationMm.join('  /  ') }}</code>
+              </div>
+              <div>
+                <span>安装旋转 RPY（°）</span>
+                <code>{{ mountTransformSummary.rpyDeg.join('  /  ') }}</code>
+              </div>
+            </div>
+            <div class="calibration-used">
+              <span>本次使用的相机外参</span>
+              <strong>{{ mountResult.calib_camera?.serial || '未知相机' }}</strong>
+              <code>{{ mountResult.calib_used }}</code>
+            </div>
+            <div v-if="mountPoseResidualRows.length" class="residual-ranking">
+              <span>各姿态拟合误差（从高到低）</span>
+              <div
+                v-for="row in mountPoseResidualRows"
+                :key="row.poseId"
+                :class="{ bad: row.rms > 10, warning: row.rms > 5 && row.rms <= 10 }"
+              >
+                <strong>{{ row.poseId }}</strong>
+                <i><b :style="{ width: `${Math.min(100, row.rms * 5)}%` }"></b></i>
+                <code>RMS {{ row.rms.toFixed(2) }} · Max {{ row.max.toFixed(2) }} mm</code>
+              </div>
+            </div>
+            <div v-if="mountPointResidualRows.length" class="worst-points">
+              <span>误差最大的模型点</span>
+              <code
+                v-for="row in mountPointResidualRows"
+                :key="row.pointId"
+              >
+                {{ row.label }}：RMS {{ row.rms.toFixed(2) }} mm（{{ row.count }} 次）
+              </code>
+            </div>
+            <div class="matrix-block">
+              <span>T_wrist2hand（腕坐标系 ← 灵巧手模型）</span>
+              <code
+                v-for="(row, rowIndex) in mountResult.T_wrist2hand"
+                :key="rowIndex"
+              >{{ row.map(formatMatrixValue).join('  ') }}</code>
+            </div>
+            <div class="tcp-list">
+              <span>派生指尖 TCP（腕坐标系，m）</span>
+              <div
+                v-for="tcp in mountResult.tcp_points_wrist_m"
+                :key="tcp.id"
+              >
+                <strong>{{ tcp.label }}</strong>
+                <code>{{ tcp.p_wrist_m.map((value) => Number(value).toFixed(6)).join(', ') }}</code>
+              </div>
+            </div>
+            <div v-if="mountResult.warnings?.length" class="mount-result-warnings">
+              <span>警告</span>
+              <p v-for="warning in mountResult.warnings" :key="warning">{{ warning }}</p>
+            </div>
+            <details class="result-paths">
+              <summary>输出文件路径</summary>
+              <code>{{ mountResult.saved_to }}</code>
+              <code v-if="mountResult.merged_calib">{{ mountResult.merged_calib }}</code>
+            </details>
+          </section>
+        </template>
+
+        <template v-else>
+        <section class="side-card">
+          <div class="panel-heading compact">
+            <div>
+              <h2>1. 选择标记颜色</h2>
+              <span>再到点云中单击对应中心</span>
+            </div>
+          </div>
+          <div class="color-grid">
+            <button
+              v-for="marker in markerColors"
+              :key="marker.color"
+              class="color-chip"
+              :class="{
+                active: activeColor === marker.color,
+                selected: selectedColors.has(marker.color),
+                saved: savedColors.has(marker.color),
+              }"
+              @click="activeColor = marker.color"
+            >
+              <i :style="{ background: marker.display_color }"></i>
+              <span>{{ marker.label_zh }}</span>
+              <small v-if="savedColors.has(marker.color)">已保存</small>
+              <small v-else-if="selectedColors.has(marker.color)">已选</small>
+            </button>
+          </div>
+        </section>
+
+        <section class="side-card grow">
+          <div class="panel-heading compact">
+            <div>
+              <h2>2. 待保存选点</h2>
+              <span>{{ selections.length }} 个</span>
+            </div>
+            <button class="text-button" :disabled="!selections.length" @click="clearSelections">清空</button>
+          </div>
+          <div class="selection-list">
+            <article v-for="item in selections" :key="item.color" class="selection-row">
+              <i :style="{ background: colorInfo(item.color).display_color }"></i>
+              <div>
+                <strong>{{ colorInfo(item.color).label_zh }}</strong>
+                <code>
+                  {{ item.point.map((value) => Number(value).toFixed(4)).join(', ') }}
+                </code>
+                <small>vertex #{{ item.vertexIndex }}</small>
+              </div>
+              <button title="删除" @click="removeSelection(item.color)">×</button>
+            </article>
+            <p v-if="!selections.length" class="empty-state">
+              先选择颜色，再单击点云中的 marker 中心。
+            </p>
+          </div>
+          <button class="primary-button" :disabled="!canSave" @click="confirmAndSave">
+            {{
+              saveBusy
+                ? '确认并保存中…'
+                : (!selections.length && episodeSamples.length
+                  ? '保存清空结果'
+                  : '确认并保存本姿态')
+            }}
+          </button>
+        </section>
+
+        <section class="side-card solve-card">
+          <div>
+            <h2>3. 联合解算</h2>
+            <span>当前共 {{ samples.length }} 条有效标记观测</span>
+          </div>
+          <button class="solve-button" :disabled="solveBusy || samples.length < 6" @click="solve">
+            {{ solveBusy ? '解算中…' : '运行手眼标定' }}
+          </button>
+          <div v-if="residualSummary" class="result-summary">
+            <div><span>RMS</span><strong>{{ residualSummary.rms }} mm</strong></div>
+            <div><span>Median</span><strong>{{ residualSummary.median }} mm</strong></div>
+            <div><span>Max</span><strong>{{ residualSummary.max }} mm</strong></div>
+          </div>
+          <p v-if="solveResult?.saved_to" class="saved-path">{{ solveResult.saved_to }}</p>
+        </section>
+        </template>
+      </aside>
+    </section>
+  </main>
+</template>
