@@ -125,6 +125,16 @@ def test_3d_wizard_prepares_automatic_capture_with_active_context(tmp_path, monk
         assert overview.status_code == 200
         assert overview.json()["annotation"]["usable_point_count"] == 0
 
+        app.state.calib3d_camera.serial = None
+        monkeypatch.setattr(
+            app.state.calib3d_camera,
+            "select",
+            lambda *_args: (_ for _ in ()).throw(RuntimeError("camera busy")),
+        )
+        occupied = client.get("/api/hand-calibration")
+        assert occupied.status_code == 200
+        assert occupied.json()["service"] == {"ok": False, "error": "camera busy"}
+
         solve = client.post("/api/hand-calibration/solve", json={"camera_role": "head"})
         assert solve.status_code == 409
         assert "当前步骤" in solve.json()["detail"]["message"]

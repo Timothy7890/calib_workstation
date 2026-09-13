@@ -278,6 +278,9 @@ onUnmounted(() => clearInterval(timer))
       <StepBar :steps="STEPS" :current="step" />
       <div v-if="error" class="alert page-message">{{ error }}</div>
       <div v-if="notice" class="alert info page-message">{{ notice }}</div>
+      <div v-if="state && !state.service?.ok" class="alert warn page-message">
+        3D相机暂不可用：{{ state.service?.error }}。请关闭占用相机的程序后刷新页面；已有数据仍可继续浏览。
+      </div>
       <div v-if="publishResult?.cloud_error" class="alert warn page-message">本地归档及18000绑定成功，但云端同步失败：{{ publishResult.cloud_error }}</div>
 
       <div class="wizard-grid">
@@ -321,7 +324,7 @@ onUnmounted(() => clearInterval(timer))
               <div v-if="!plans.length" class="alert warn">当前手臂没有3D采集计划，请先到“采集计划”创建并完成校验。</div>
               <div v-else-if="plans.every((plan) => plan.draft)" class="alert warn">当前手臂的3D计划均为草稿，请先完成原点与轨迹校验。</div>
               <RouterLink v-if="!plans.length || plans.every((plan) => plan.draft)" class="btn ghost plan-link" :to="{ name: 'plans' }">前往采集计划</RouterLink>
-              <button class="btn lg" :disabled="!!busy || !extrinsic || !form.camera_serial || !form.plan_id" @click="prepareCapture">下一步：接管手臂</button>
+              <button class="btn lg" :disabled="!!busy || state?.service?.ok === false || !extrinsic || !form.camera_serial || !form.plan_id" @click="prepareCapture">下一步：接管手臂</button>
             </template>
             <template v-else>
               <label class="field">已拍摄任务目录

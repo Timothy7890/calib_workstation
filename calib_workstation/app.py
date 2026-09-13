@@ -540,9 +540,12 @@ def create_app(config: Config) -> FastAPI:
         role = str(current_job.get("camera_role") or active.get("camera_role") or "head")
         remembered = ws.cameras.get(role) or {}
         serial = str(remembered.get("serial") or "")
-        if serial and calib3d_camera.supports(serial) and calib3d_camera.serial != serial:
-            calib3d_camera.select(role, serial)
         ok3d, error3d = True, None
+        if serial and calib3d_camera.supports(serial) and calib3d_camera.serial != serial:
+            try:
+                calib3d_camera.select(role, serial)
+            except (RuntimeError, ValueError) as exc:
+                ok3d, error3d = False, str(exc)
         mount = local_3d_payload(await calib3d_mount.api_mount_result())
         current = {
             artifact_type: active_camera_manifest(artifact_type, role)

@@ -62,11 +62,81 @@ EOF
 PORT_REPLAY="${URL_REPLAY##*:}"
 echo "[start] 配置 $CONFIG  数据目录 $DATA_ROOT（机器人编号在页面里输入）"
 
-# ---- 端口检查 ----
+# ---- 残留进程与端口检查 ----
 port_free() { ! ss -ltn 2>/dev/null | awk -v p="$1" '$4 ~ (":" p "$") {f=1} END {exit !f}'; }
-for p in "$PORT_WS"; do
-  port_free "$p" || { echo "[start] 端口 $p 已被占用，请先结束旧进程" >&2; exit 1; }
-done
+
+process_alive() {
+  [ -r "/proc/$1/stat" ] || return 1
+  [ "$(awk '{print $3}' "/proc/$1/stat" 2>/dev/null)" != "Z" ]
+}
+
+stop_bounded() {
+  local pid="$1" label="$2" waited=0
+  process_alive "$pid" || return 0
+  echo "[start] 正在停止 $label（pid $pid）…"
+  kill -TERM "$pid" 2>/dev/null || true
+  while process_alive "$pid" && [ "$waited" -lt 50 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  if process_alive "$pid"; then
+    echo "[start] $label 在5秒内未退出，强制清理 pid $pid"
+    kill -KILL "$pid" 2>/dev/null || true
+    waited=0
+    while process_alive "$pid" && [ "$waited" -lt 20 ]; do
+      sleep 0.1
+      waited=$((waited + 1))
+    done
+  fi
+  wait "$pid" 2>/dev/null || true
+  ! process_alive "$pid"
+}
+
+orphaned_workstations() {
+  local proc pid ppid cwd cmd
+  for proc in /proc/[0-9]*; do
+    pid="${proc##*/}"
+    [ "$pid" != "$$" ] || continue
+    ppid="$(awk '{print $4}' "$proc/stat" 2>/dev/null)" || continue
+    [ "$ppid" = "1" ] || continue
+    cwd="$(readlink -f "$proc/cwd" 2>/dev/null)" || continue
+    [ "$cwd" = "$ROOT" ] || continue
+    cmd=" $(tr '\0' ' ' <"$proc/cmdline" 2>/dev/null) "
+    if [[ "$cmd" == *"-m calib_workstation"* && "$cmd" == *"--port $PORT_WS"* ]]; then
+      echo "$pid"
+    fi
+  done
+}
+
+orbbec_holders() {
+  command -v lsusb >/dev/null 2>&1 || return 0
+  command -v fuser >/dev/null 2>&1 || return 0
+  lsusb -d 2bc5: 2>/dev/null | while read -r _ bus _ device _; do
+    device="${device%:}"
+    fuser "/dev/bus/usb/$bus/$device" 2>/dev/null || true
+  done | tr ' ' '\n' | awk '/^[0-9]+$/ && !seen[$0]++'
+}
+
+STALE_WS="$(orphaned_workstations)"
+if ! port_free "$PORT_WS"; then
+  if [ -n "$STALE_WS" ]; then
+    echo "[start] 端口 $PORT_WS 已被同项目18005进程占用（pid: $(echo "$STALE_WS" | tr '\n' ' ')），请复用当前服务或先正常结束它" >&2
+  else
+    echo "[start] 端口 $PORT_WS 已被占用，请先结束对应进程" >&2
+  fi
+  exit 1
+fi
+if [ -n "$STALE_WS" ]; then
+  echo "[start] 发现同项目残留的18005进程: $(echo "$STALE_WS" | tr '\n' ' ')"
+  for p in $STALE_WS; do
+    stop_bounded "$p" "残留18005" || {
+      echo "[start] 无法清理残留18005（pid $p），中止启动" >&2
+      exit 1
+    }
+  done
+fi
+port_free "$PORT_WS" || { echo "[start] 清理后端口 $PORT_WS 仍被占用，中止启动" >&2; exit 1; }
+
 if ! port_free "$PORT_REPLAY"; then
   if "$REPLAY_DIR/replay.sh" status | grep -q "运行中"; then
     echo "[start] 18004 已由 replay.sh 启动，复用（本脚本退出时不会停止它）"; REPLAY_OWNED=0
@@ -94,8 +164,8 @@ PID_WS=""; PID_FE=""; CAMERA_LOCKED=0
 cleanup() {
   trap - INT TERM EXIT
   echo ""; echo "[start] 正在退出…"
-  [ -n "$PID_FE" ] && kill "$PID_FE" 2>/dev/null
-  [ -n "$PID_WS" ] && kill "$PID_WS" 2>/dev/null
+  [ -n "$PID_FE" ] && stop_bounded "$PID_FE" "前端开发服务"
+  [ -n "$PID_WS" ] && stop_bounded "$PID_WS" "18005工作站"
   [ "${REPLAY_OWNED:-0}" -eq 1 ] && "$REPLAY_DIR/replay.sh" stop
   [ "$CAMERA_LOCKED" -eq 1 ] && "$ROOT/scripts/camera_lock.sh" release
   exit 0
@@ -106,6 +176,12 @@ trap cleanup INT TERM EXIT
 if [ "$MOCK" -eq 0 ]; then
   "$ROOT/scripts/camera_lock.sh" acquire || exit 1
   CAMERA_LOCKED=1
+  CAMERA_HOLDERS="$(orbbec_holders)"
+  if [ -n "$CAMERA_HOLDERS" ]; then
+    echo "[start] Orbbec仍被以下进程占用，未启动18005：" >&2
+    ps -o pid,ppid,stat,cmd -p "$(echo "$CAMERA_HOLDERS" | paste -sd, -)" >&2 || true
+    exit 1
+  fi
 fi
 
 # ---- 18004 ----
