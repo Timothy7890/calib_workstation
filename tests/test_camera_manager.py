@@ -6,6 +6,7 @@ import pytest
 
 from calib_workstation.camera import CameraManager
 from calib_workstation.camera.orbbec import OrbbecSource
+from calib_workstation.camera.color_orbbec import ColorOrbbecSource
 
 
 class FakeSource:
@@ -190,3 +191,21 @@ def test_orbbec_source_rejects_calibration_from_another_camera(tmp_path):
     source = orbbec_source(tmp_path)
     with pytest.raises(ValueError, match="不能用于"):
         OrbbecSource("CAM-2", calibration_path=source.calibration_path)
+
+
+def test_color_only_source_selects_best_2d_profile():
+    class OBFormat:
+        RGB = "RGB"
+        MJPG = "MJPG"
+        NV12 = "NV12"
+        YUYV = "YUYV"
+
+    Formats = type("Formats", (), {"OBFormat": OBFormat})
+
+    profiles = FakeProfiles(
+        FakeProfile(1280, 720, 30, "RGB"),
+        FakeProfile(1920, 1080, 30, "MJPG"),
+        FakeProfile(1920, 1080, 15, "RGB"),
+    )
+    selected = ColorOrbbecSource._best_profile(Formats, profiles)
+    assert (selected.get_width(), selected.get_height(), selected.get_fps()) == (1920, 1080, 30)

@@ -82,6 +82,7 @@ record_lock = threading.Lock()
 # 配置区分功能用；确认样本时的校验走 get_capability_hint 每次现查）
 capability_url: str = "http://127.0.0.1:18000"
 capability_snapshot: dict | None = None
+workstation_data_root: Path | None = None
 RECORD_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 ARM_DATASET_JOINTS = {
     "right": list(RIGHT_ARM_DATASET_JOINTS),

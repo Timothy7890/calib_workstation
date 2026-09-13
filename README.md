@@ -21,8 +21,9 @@ cd /home/robot/yx/project/calib/calib_workstation
 ./start.sh --arm left      # 初始选择左臂（向导里会按计划自动切换）
 ./start.sh --mock          # 无硬件联调：18005 mock 相机（带可检出的棋盘格），18004 --mock 但采集仍走 HTTP
 ./start.sh --dev           # 前端 Vite 开发服务器 5175
-./start.sh --3d            # 兼容旧命令；3D 已默认内置，不再启动 8132
 ```
+
+2D 与 3D 始终随 `./start.sh` 同时可用，不再需要额外的 3D 启动参数。
 
 脚本顺序：找 Python → 读 `config/workstation.yaml` → 检查端口 → 18000 可达（否则拉起 `IK_replay/capability.sh`）
 → `scripts/camera_lock.sh acquire` 释放相机 → 18004（`replay.sh start`）→ 前端构建（缺失时）→ 18005（含原生2D/3D引擎）。

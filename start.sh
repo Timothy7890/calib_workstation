@@ -6,7 +6,6 @@
 #   ./start.sh --arm left       # 向导初始选择左臂（向导里可按计划切换）
 #   ./start.sh --mock           # 无硬件联调：18005 mock 相机，18004 --mock，不碰 18000 与推流
 #   ./start.sh --dev            # 前端用 Vite 开发服务器（5175）代替构建产物
-#   ./start.sh --3d             # 兼容旧命令；3D 已默认内置，不再启动 8132
 #
 # 环境变量：PYTHON、NETWORK_INTERFACE（默认 enp86s0）、WORKSTATION_CONFIG、CAPABILITY_SH
 set -u
@@ -22,12 +21,11 @@ CAPABILITY_URL="${CAPABILITY_URL:-http://127.0.0.1:18000}"
 CAPABILITY_SH="${CAPABILITY_SH:-/home/robot/yx/project/IK_replay/capability.sh}"
 LOG_DIR="$ROOT/logs"; mkdir -p "$LOG_DIR"
 
-MOCK=0; DEV=0; ARM="right"; LEGACY_3D_FLAG=0
+MOCK=0; DEV=0; ARM="right"
 while [ $# -gt 0 ]; do
   case "$1" in
     --mock) MOCK=1 ;;
     --dev) DEV=1 ;;
-    --3d|--3d=*) LEGACY_3D_FLAG=1 ;;
     --arm) shift; ARM="${1:-right}" ;;
     --arm=*) ARM="${1#--arm=}" ;;
     -h|--help) sed -n 2,15p "$0"; exit 0 ;;
@@ -36,18 +34,17 @@ while [ $# -gt 0 ]; do
   shift
 done
 case "$ARM" in left|right) ;; *) echo "[start] --arm 只能是 left/right" >&2; exit 1 ;; esac
-[ "$LEGACY_3D_FLAG" -eq 1 ] && echo "[start] 提示：--3d 已无需使用，3D 功能默认内置于 18005"
 
 # ---- Python ----
 PY="${PYTHON:-}"
 if [ -z "$PY" ]; then
   for c in "$HOME/miniconda3/envs/fastapi/bin/python" "$HOME/anaconda3/envs/fastapi/bin/python" \
            "${CONDA_PREFIX:-/nonexistent}/bin/python"; do
-    [ -x "$c" ] && "$c" -c "import cv2, fastapi, numpy, uvicorn, yaml" >/dev/null 2>&1 && { PY="$c"; break; }
+    [ -x "$c" ] && "$c" -c "import cv2, fastapi, numpy, uvicorn, yaml, zmq" >/dev/null 2>&1 && { PY="$c"; break; }
   done
 fi
-if [ -z "$PY" ] || ! "$PY" -c "import cv2, fastapi, numpy, uvicorn, yaml" >/dev/null 2>&1; then
-  echo "[start] 找不到含 cv2/fastapi/numpy/uvicorn/yaml 的 Python，请设置 PYTHON=..." >&2; exit 1
+if [ -z "$PY" ] || ! "$PY" -c "import cv2, fastapi, numpy, uvicorn, yaml, zmq" >/dev/null 2>&1; then
+  echo "[start] 找不到含 cv2/fastapi/numpy/uvicorn/yaml/zmq 的 Python，请设置 PYTHON=..." >&2; exit 1
 fi
 echo "[start] Python: $PY"
 
@@ -116,9 +113,13 @@ if [ "${REPLAY_OWNED:-0}" -eq 1 ]; then
   echo "[start] 正在启动 18004 轨迹回放…"
   # mock 下采集仍走 HTTP 到 18005 原生 mock 引擎，跑通全链路。
   if [ "$MOCK" -eq 1 ]; then
-    BASE_URL_2D="$URL_2D" CALIB_WORKSTATION_URL="$URL_2D" "$REPLAY_DIR/replay.sh" start --mock --capture-http
+    BASE_URL_2D="$URL_2D" BASE_URL_3D="$URL_2D/three-d" \
+      CALIB_WORKSTATION_URL="$URL_2D" HAND_EYE_3D_PROJECT="$ROOT" \
+      "$REPLAY_DIR/replay.sh" start --mock --capture-http
   else
-    BASE_URL_2D="$URL_2D" CALIB_WORKSTATION_URL="$URL_2D" "$REPLAY_DIR/replay.sh" start
+    BASE_URL_2D="$URL_2D" BASE_URL_3D="$URL_2D/three-d" \
+      CALIB_WORKSTATION_URL="$URL_2D" HAND_EYE_3D_PROJECT="$ROOT" \
+      "$REPLAY_DIR/replay.sh" start
   fi || exit 1
 fi
 
@@ -126,7 +127,7 @@ fi
 if [ "$DEV" -eq 1 ]; then
   (cd "$ROOT/frontend" && exec npx vite --port 5175 --host 0.0.0.0) >>"$LOG_DIR/frontend-dev.log" 2>&1 &
   PID_FE=$!
-elif [ ! -f "$ROOT/frontend/dist/index.html" ]; then
+elif [ ! -f "$ROOT/frontend/dist/index.html" ] || [ ! -f "$ROOT/frontend/dist/three-d-ui/index.html" ]; then
   if command -v npm >/dev/null 2>&1; then
     echo "[start] 前端未构建，正在 npm install && npm run build …"
     (cd "$ROOT/frontend" && npm install --silent && npm run build --silent) || { echo "[start] 前端构建失败" >&2; exit 1; }

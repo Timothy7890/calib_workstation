@@ -363,7 +363,7 @@ def _load_mount_calibration(
 
 
 def _mount_calibration_catalog() -> tuple[list[dict[str, Any]], str | None]:
-    """列出 2D/3D 项目中的相机外参，并标记与当前 episode 是否兼容。"""
+    """列出当前机器人统一归档中的相机外参，并标记episode兼容性。"""
     state = _state()
     candidates: set[Path] = set()
     if state.mount_calib_path is not None:
@@ -373,10 +373,18 @@ def _mount_calibration_catalog() -> tuple[list[dict[str, Any]], str | None]:
         candidates.add(Path(latest).expanduser().resolve())
     for path in state.save_path.parent.glob("*/handeye3d_result.json"):
         candidates.add(path.resolve())
-    handeye_2d_data = PROJECT_ROOT.parent / "hand_eye_2D" / "handeye_data"
-    if handeye_2d_data.is_dir():
-        for path in handeye_2d_data.glob("*/handeye_result*.json"):
-            candidates.add(path.resolve())
+    data_root = getattr(state, "workstation_data_root", None)
+    if data_root is not None:
+        try:
+            selected = json.loads(
+                (Path(data_root) / "workstation_state.json").read_text(encoding="utf-8")
+            ).get("unit_code")
+        except (OSError, ValueError, AttributeError):
+            selected = None
+        if selected:
+            pattern = f"{selected}/calibrations/extrinsic/*/*/handeye_result*.json"
+            for path in Path(data_root).glob(pattern):
+                candidates.add(path.resolve())
 
     entries: list[dict[str, Any]] = []
     for path in candidates:
@@ -403,7 +411,7 @@ def _mount_calibration_catalog() -> tuple[list[dict[str, Any]], str | None]:
                 "base_link": payload.get("base_link") if isinstance(payload, dict) else None,
             }
         stat = path.stat()
-        source = "hand_eye_2D" if "hand_eye_2D" in path.parts else "hand_eye_3D"
+        source = "native_2d" if path.name.startswith("handeye_result") else "native_3d"
         entries.append(
             {
                 "path": str(path),

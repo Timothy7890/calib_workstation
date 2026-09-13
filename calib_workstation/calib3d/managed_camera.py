@@ -58,6 +58,9 @@ class ManagedRGBDCamera:
             self._last_preview = None
         return self.info()
 
+    def supports(self, serial: str) -> bool:
+        return self.mock or self.calibration is None or self.calibration.serial in (None, serial)
+
     def start(self) -> None:
         """Lifecycle is owned by CameraManager; selection starts the pipeline."""
 

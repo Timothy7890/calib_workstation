@@ -8,8 +8,6 @@ robot:
 services:
   hand_eye_2d: http://127.0.0.1:18005     # 原生2D兼容API与图像流（由18005自身提供）
   replay: http://127.0.0.1:18004          # 轨迹回放（人工监护）
-  hand_eye_3d: http://127.0.0.1:18005/three-d  # 原生3D API（由18005同进程提供）
-  hand_eye_3d_ui: /three-d-ui             # 18005 内置3D点云/手安装操作台
   capability: http://127.0.0.1:18000      # 能力中心
 
 camera:

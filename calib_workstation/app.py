@@ -22,7 +22,9 @@ from .cloud import CloudError, CloudSettings, CloudSync
 from .config import CAMERA_ROLES, UNIT_CODE_RE, Config, validate_unit_code
 from .manifest import ARTIFACT_TYPES, ArtifactStore
 from .calib2d import Calib2DEngine
-from .camera import CameraManager, MockSource, OrbbecSource, discover_orbbec
+from .camera import (
+    CameraManager, ColorOrbbecSource, MockSource, OrbbecSource, discover_orbbec,
+)
 from .calib3d import app as calib3d_app
 from .calib3d import mount_api as calib3d_mount
 from .calib3d.runtime import configure as configure_calib3d
@@ -33,7 +35,7 @@ _RUN_NAME_RE = re.compile(r"^[^\W.][\w.-]{0,63}$")
 # 相机位置或手部 subject_key（目录名）：小写字母/数字/下划线/连字符
 _ROLE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,127}$")
 _FRONTEND_DIST = Path(__file__).resolve().parents[1] / "frontend" / "dist"
-_CALIB_ROOT = Path(__file__).resolve().parents[2]
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
 logger = logging.getLogger(__name__)
 
 
@@ -104,7 +106,10 @@ class Workspace:
         self.store = ArtifactStore(
             root / "calibrations",
             unit_code=unit_code, vendor=self.config.vendor, model=self.config.model,
-            tool_projects={"hand_eye_2D": _CALIB_ROOT / "hand_eye_2D"},
+            tool_projects={
+                "hand_eye_2D": _PROJECT_ROOT,
+                "hand_eye_3D": _PROJECT_ROOT,
+            },
         )
         self.job = Job(root / "state" / "current_job.json")
         self.cameras_path = root / "state" / "cameras.json"
@@ -210,9 +215,17 @@ def create_app(config: Config) -> FastAPI:
         camera_manager = CameraManager(
             lambda serial: MockSource(serial), lambda: mock_devices)
     else:
+        try:
+            rgbd_payload = json.loads(config.rgbd_calibration_path.read_text(encoding="utf-8"))
+            rgbd_serial = str((rgbd_payload.get("device") or {}).get("serial") or "")
+        except (OSError, ValueError, TypeError):
+            rgbd_serial = ""
         camera_manager = CameraManager(
-            lambda serial: OrbbecSource(
-                serial, calibration_path=config.rgbd_calibration_path),
+            lambda serial: (
+                OrbbecSource(serial, calibration_path=config.rgbd_calibration_path)
+                if serial == rgbd_serial
+                else ColorOrbbecSource(serial)
+            ),
             discover_orbbec,
         )
     calib2d = Calib2DEngine(
@@ -413,7 +426,8 @@ def create_app(config: Config) -> FastAPI:
         try:
             role = native_camera_role(serial, body.get("camera_role"))
             camera = calib2d.select(role, serial)
-            calib3d_camera.select(role, serial)
+            if calib3d_camera.supports(serial):
+                calib3d_camera.select(role, serial)
             return {"success": True, "camera": camera}
         except (KeyError, ValueError, RuntimeError) as exc:
             raise fail(409, str(exc)) from exc
@@ -498,6 +512,10 @@ def create_app(config: Config) -> FastAPI:
         registry = capability_registry()
         active = registry.get("active") or {}
         role = str(active.get("camera_role") or "head")
+        remembered = ws.cameras.get(role) or {}
+        serial = str(remembered.get("serial") or "")
+        if serial and calib3d_camera.supports(serial) and calib3d_camera.serial != serial:
+            calib3d_camera.select(role, serial)
         ok3d, error3d = True, None
         mount = local_3d_payload(await calib3d_mount.api_mount_result())
         current = {

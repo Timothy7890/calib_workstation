@@ -24,6 +24,6 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     config.data_root.mkdir(parents=True, exist_ok=True)
     print(f"[workstation] 产物根目录 {config.data_root}（机器人编号在页面输入，落 <data_root>/<编号>/calibrations）")
-    print(f"[workstation] 2D {config.hand_eye_2d_url}  3D {config.hand_eye_3d_url}  回放 {config.replay_url}  18000 {config.capability_url}")
+    print(f"[workstation] 2D/3D 内置于18005  回放 {config.replay_url}  18000 {config.capability_url}")
     uvicorn.run(create_app(config), host=args.host, port=args.port, log_level="info")
     return 0

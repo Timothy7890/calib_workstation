@@ -62,5 +62,6 @@ def configure(
     ).resolve()
     app_module.capability_url = capability_url.rstrip("/")
     app_module.capability_snapshot = None
+    app_module.workstation_data_root = data_root.resolve()
     app_module.init_state()
     return camera
