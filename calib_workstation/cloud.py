@@ -178,6 +178,8 @@ class CloudSync:
 
     @staticmethod
     def needs_push(manifest: dict[str, Any]) -> bool:
+        if manifest.get("local_only"):
+            return False
         cloud = manifest.get("cloud") or {}
         if not cloud.get("pushed"):
             return True
@@ -186,6 +188,8 @@ class CloudSync:
     @staticmethod
     def sync_state(manifest: dict[str, Any]) -> str:
         """synced | stale（本地状态变了）| pending（从没推过）"""
+        if manifest.get("local_only"):
+            return "local_only"
         cloud = manifest.get("cloud") or {}
         if not cloud.get("pushed"):
             return "pending"
@@ -203,6 +207,8 @@ class CloudSync:
         except (OSError, ValueError) as exc:
             raise CloudError(f"读取 {manifest_path} 失败: {exc}") from exc
         files = [target / f["name"] for f in manifest.get("files") or [] if f.get("name")]
+        if manifest.get("local_only"):
+            raise CloudError("通用工具产物暂仅支持本地归档及下载")
         missing = [p.name for p in files if not p.is_file()]
         if missing:
             raise CloudError(f"产物目录缺少文件 {missing}，无法推送")
@@ -232,6 +238,9 @@ class CloudSync:
                              "pushed": [], "failed": [], "skipped": 0}
                 return self.last
             for manifest in store.list():
+                if manifest.get("local_only"):
+                    skipped += 1
+                    continue
                 if not force and not self.needs_push(manifest):
                     skipped += 1
                     continue

@@ -1453,7 +1453,7 @@ async function loadHandsCatalog() {
   const data = await response.json()
   hands.value = data.hands || []
   if (!hands.value.some((item) => item.hand_id === selectedHandId.value)) {
-    const savedHandId = mountSamples.value[0]?.hand_id
+    const savedHandId = new URLSearchParams(location.search).get('model_id') || mountSamples.value[0]?.hand_id
     selectedHandId.value = hands.value.find((item) => item.hand_id === savedHandId)?.hand_id
       || hands.value[0]?.hand_id
       || ''

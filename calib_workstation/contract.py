@@ -47,6 +47,7 @@ def canonical_subject(
     arm: str | None = None,
     hand_id: str | None = None,
     hand_serial: str | None = None,
+    tool_id: str | None = None,
 ) -> dict[str, Any]:
     """Build the identity of the physical object described by an artifact."""
     unit = _required_text(unit_code, "unit_code")
@@ -58,6 +59,10 @@ def canonical_subject(
             "camera_serial": str(camera_serial or "").strip() or None,
         }
     if artifact_type in HAND_ARTIFACT_TYPES:
+        if tool_id and artifact_type == "tcp_profile":
+            return {"kind": "tool", "unit_code": unit,
+                    "arm": _required_text(arm, "subject.arm"),
+                    "tool_id": _required_text(tool_id, "subject.tool_id")}
         return {
             "kind": "hand",
             "unit_code": unit,
@@ -74,6 +79,8 @@ def subject_key(artifact_type: str, subject: dict[str, Any]) -> str:
         return _required_text(subject.get("camera_role"), "subject.camera_role")
     if artifact_type in HAND_ARTIFACT_TYPES:
         arm = _required_text(subject.get("arm"), "subject.arm")
+        if subject.get("kind") == "tool" and artifact_type == "tcp_profile":
+            return f"{arm}__tool__{_required_text(subject.get('tool_id'), 'subject.tool_id')}"
         hand_id = _required_text(subject.get("hand_id"), "subject.hand_id")
         return f"{arm}__{hand_id}"
     raise ContractError(f"未知产物类型 {artifact_type!r}")
@@ -118,6 +125,7 @@ def normalize_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
             arm=subject.get("arm"),
             hand_id=subject.get("hand_id"),
             hand_serial=subject.get("hand_serial"),
+            tool_id=subject.get("tool_id") if subject.get("kind") == "tool" else None,
         )
     out["schema"] = SCHEMA_V2
     out["subject"] = subject

@@ -95,11 +95,13 @@ class ArtifactStore:
         camera_serial: str | None,
         hand_id: str | None = None,
         hand_serial: str | None = None,
+        tool_id: str | None = None,
         tool: str,
         source_run_dir: Path,
         quality: dict[str, Any],
         extra: dict[str, Any] | None = None,
         overwrite: bool = False,
+        json_files: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         target = self.artifact_dir(artifact_type, camera_role, run_id)
         if target.exists() and not overwrite:
@@ -110,7 +112,10 @@ class ArtifactStore:
             if not src.is_file():
                 raise FileNotFoundError(f"缺少产物文件: {src}")
             dst = target / src.name
-            shutil.copy2(src, dst)
+            if json_files and src.name in json_files:
+                dst.write_text(json.dumps(json_files[src.name], ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            else:
+                shutil.copy2(src, dst)
             file_entries.append({
                 "name": src.name,
                 "bytes": dst.stat().st_size,
@@ -125,6 +130,7 @@ class ArtifactStore:
             arm=arm,
             hand_id=hand_id,
             hand_serial=hand_serial,
+            tool_id=tool_id,
         )
         manifest = {
             "schema": MANIFEST_SCHEMA,
@@ -297,6 +303,7 @@ class ArtifactStore:
             camera_role=subject_partition,
             run_id=run_id,
             files=[result_path],
+            json_files={result_path.name: {**result, "model_id": result.get("hand_id"), "hand_id": hand_id}},
             arm=arm,
             camera_serial=None,
             hand_id=hand_id,

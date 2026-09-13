@@ -28,6 +28,7 @@ from .camera import (
 from .calib3d import app as calib3d_app
 from .calib3d import mount_api as calib3d_mount
 from .calib3d.runtime import configure as configure_calib3d
+from .tool_workflow import install_object_routes
 
 ARMS = ("left", "right")
 # 运行名：允许中文等 Unicode 字母/数字、. _ -；不能有空格、斜杠，不能以 . 开头（与 18004 一致）
@@ -243,6 +244,7 @@ def create_app(config: Config) -> FastAPI:
         mock=config.mock,
     )
     app.state.calib3d_camera = calib3d_camera
+    calib3d_app.annotation_context = lambda: job().snapshot()
     app.router.add_event_handler("shutdown", camera_manager.close)
     app.router.add_event_handler("shutdown", calib3d_app.pose_provider.close)
 
@@ -509,11 +511,21 @@ def create_app(config: Config) -> FastAPI:
 
     async def hand_annotation_state(episodes: list[dict[str, Any]]) -> dict[str, Any]:
         """Summarize the mount samples that belong to the currently selected episodes."""
+        current = job().snapshot()
+        if current.get("object_mode") in ("tool", "tcp"):
+            samples = current.get("tool_samples", [])
+            required = ["tcp"] if current["object_mode"] == "tcp" else ["origin", "x", "xy"]
+            counts = {key: len({s["episode"] for s in samples if s["point_id"] == key}) for key in required}
+            for episode in episodes:
+                episode["mount_sample_count"] = sum(s["episode"] == episode["name"] for s in samples)
+            return {"sample_count": len(samples), "pose_count": len({s["episode"] for s in samples}),
+                    "usable_point_count": sum(count >= 3 for count in counts.values()), "min_points": len(required)}
         payload = local_3d_payload(await calib3d_mount.api_mount_samples())
         episode_names = {str(item.get("name")) for item in episodes if item.get("name")}
         samples = [
             item for item in (payload.get("samples") or [])
             if str(item.get("pose_id") or "") in episode_names
+            and (not current.get("model_id") or item.get("hand_id") == current["model_id"])
         ]
         counts: dict[str, int] = {}
         for sample in samples:
@@ -547,6 +559,8 @@ def create_app(config: Config) -> FastAPI:
             except (RuntimeError, ValueError) as exc:
                 ok3d, error3d = False, str(exc)
         mount = local_3d_payload(await calib3d_mount.api_mount_result())
+        if current_job.get("object_mode") in ("tool", "tcp"):
+            mount = {"result": current_job.get("tool_result"), "stale": False}
         current = {
             artifact_type: active_camera_manifest(artifact_type, role)
             for artifact_type in ("extrinsic", "intrinsic", "camera_transform")
@@ -693,13 +707,21 @@ def create_app(config: Config) -> FastAPI:
             sample_count=len(episodes), solved=False, finalized=False,
         ), "episodes": episodes, "annotation": annotation}
 
+    solve_generic, archive_generic = install_object_routes(
+        app, job=job, require_job=require_hand_job, registry=capability_registry,
+        extrinsic=lambda role: active_camera_manifest("extrinsic", role),
+        store=store, fail=fail, payload=local_3d_payload,
+    )
+
     @app.post("/api/hand-calibration/annotation-complete")
     async def api_hand_calibration_annotation_complete():
-        require_hand_job("annotating", "annotated", "solved")
+        current = require_hand_job("annotating", "annotated", "solved")
         scanned = local_3d_payload(await calib3d_app.api_offline_episodes())
         episodes = scanned.get("episodes") or []
         annotation = await hand_annotation_state(episodes)
         if annotation["usable_point_count"] < annotation["min_points"]:
+            if current.get("object_mode") in ("tool", "tcp"):
+                raise fail(409, "选点尚未完成：每个特征点需要至少3个不同姿态的观测")
             raise fail(
                 409,
                 "有效模型点不足：当前 "
@@ -714,6 +736,8 @@ def create_app(config: Config) -> FastAPI:
     @app.post("/api/hand-calibration/solve")
     async def api_hand_calibration_solve(body: dict):
         current_job = require_hand_job("annotated", "solved")
+        if current_job.get("object_mode") in ("tool", "tcp"):
+            return await solve_generic()
         registry = capability_registry()
         active = registry.get("active") or {}
         if active.get("arm") != f"{current_job.get('arm')}_arm" or active.get("hand_id") != current_job.get("hand_id"):
@@ -735,6 +759,8 @@ def create_app(config: Config) -> FastAPI:
     @app.post("/api/hand-calibration/finalize")
     async def api_hand_calibration_finalize(body: dict):
         current_job = require_hand_job("solved", "finalized")
+        if current_job.get("object_mode") in ("tool", "tcp"):
+            return archive_generic(body)
         run_id = str(body.get("run_id") or "").strip()
         if not _RUN_NAME_RE.match(run_id):
             raise fail(422, "运行名不能为空，只能含 Unicode 字母/数字及 . _ -，且不能以 . 开头")
@@ -763,7 +789,7 @@ def create_app(config: Config) -> FastAPI:
         if result_arm and f"{result_arm}_arm" != arm:
             raise fail(409, f"3D结果属于 {result.get('arm')}，18000 当前激活的是 {arm}")
         result_hand = str(result.get("hand_id") or "")
-        if result_hand and result_hand != hand_id:
+        if result_hand and result_hand != (current_job.get("model_id") or hand_id):
             raise fail(409, f"3D结果属于手 {result_hand}，18000 当前激活的是 {hand_id}")
         result_path = Path(str(result.get("saved_to") or ""))
         hand = next((item for item in registry.get("hands") or []
@@ -1236,6 +1262,9 @@ def create_app(config: Config) -> FastAPI:
         """设为生效。默认连同同一 run_id 一起归档的其他类型（外参 ↔ 内参）一并切换，
         保证生效的外参与它求解时用的内参始终配对。"""
         any_role(role)
+        manifest = store().get(artifact_type, role, run_id)
+        if manifest and manifest.get("local_only"):
+            raise fail(409, "通用工具产物暂仅支持本地归档及下载，不能绑定手型号")
         try:
             result = store().set_active(artifact_type, role, run_id)
         except FileNotFoundError as exc:

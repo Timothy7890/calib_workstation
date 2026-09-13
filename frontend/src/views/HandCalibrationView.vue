@@ -4,6 +4,7 @@ import { api } from '../api'
 import { streamUrl, useConfig } from '../composables/useConfig'
 import CameraPreview from '../components/CameraPreview.vue'
 import StepBar from '../components/StepBar.vue'
+import ToolPointPicker from '../components/ToolPointPicker.vue'
 
 const STEPS = [
   { id: 'setup', label: '数据与计划' },
@@ -31,6 +32,15 @@ const busy = ref('')
 const iframeKey = ref(0)
 const publishResult = ref(null)
 const handSerial = ref('')
+const models = ref([])
+const objectForm = ref({ mode: 'hand', model_id: '', tool_id: '' })
+let objectContextKey = ''
+const generic = computed(() => ['tool', 'tcp'].includes(job.value.object_mode))
+async function selectObject() {
+  const response = await guard('object', () => api.selectCalibrationObject(objectForm.value))
+  if (response) { job.value = response.job; iframeKey.value += 1; await refresh({ keepStep: true }) }
+}
+async function pointsUpdated(value) { job.value = value; await refresh({ keepStep: true }) }
 const archiveRunId = ref(defaultRunId())
 const form = ref({
   source: 'capture',
@@ -141,6 +151,11 @@ async function refresh({ keepStep = false } = {}) {
     tasks.value = response.tasks || []
     episodes.value = response.episodes || []
     annotation.value = response.annotation || {}
+    const contextKey = JSON.stringify([job.value.object_mode, job.value.model_id, job.value.tool_id])
+    if (job.value.object_mode && contextKey !== objectContextKey) {
+      objectForm.value = { mode: job.value.object_mode, model_id: job.value.model_id || '', tool_id: job.value.tool_id || '' }
+      objectContextKey = contextKey
+    }
     syncForm()
     if (!keepStep) step.value = stepFromJob(job.value)
   } catch (exception) {
@@ -151,6 +166,7 @@ async function refresh({ keepStep = false } = {}) {
 async function loadOptions() {
   try {
     cameras.value = await api.cameras()
+    models.value = (await api.handModels()).hands || []
     syncForm()
     await loadPlans()
   } catch (exception) {
@@ -239,7 +255,7 @@ async function solve() {
 }
 
 async function finalize() {
-  if (!confirm('确认当前3D解算结果正确，并归档为当前手安装与TCP标定？')) return
+  if (!confirm(generic.value ? '确认结果并归档为独立工具TCP？' : '确认当前3D解算结果正确，并归档为当前手安装与TCP标定？')) return
   const response = await guard('finalize', () => api.finalizeHandCalibration({
     run_id: archiveRunId.value,
     camera_role: job.value.camera_role || form.value.camera_role,
@@ -247,7 +263,7 @@ async function finalize() {
   }))
   if (!response) return
   publishResult.value = response
-  notice.value = '已归档 hand_mount 与 tcp_profile，并绑定至18000当前组合。'
+  notice.value = response.local_only ? '工具TCP已归档，可在标定记录下载；通用工具暂不绑定18000的手型号。' : '已归档 hand_mount 与 tcp_profile，并绑定至18000当前组合。'
   await refresh({ keepStep: true })
 }
 
@@ -292,9 +308,10 @@ onUnmounted(() => clearInterval(timer))
       <div class="page-heading">
         <div>
           <h1 class="page-title">3D 手安装 / TCP 标定</h1>
-          <p class="page-desc">与2D相同的自动轨迹采集流程；采集后增加点云手动选点，再统一求解、归档并绑定至18000。</p>
+          <p class="page-desc">自动采集后选择标定对象：已知手模型、普通刚性工具或单点TCP，再选点、求解与归档。</p>
         </div>
         <button v-if="job.calibration_kind === '3d'" class="btn ghost" :disabled="!!busy || isRunning" @click="reset">重新开始</button>
+        <button v-if="armEngaged || isRunning" class="btn danger" @click="api.stop().catch(e => error = e.message)">立即停止（保持手臂）</button>
       </div>
 
       <StepBar :steps="STEPS" :current="step" />
@@ -402,10 +419,17 @@ onUnmounted(() => clearInterval(timer))
 
           <article v-else-if="step === 'annotate'" class="annotation-card">
             <div class="annotation-head">
-              <div><h2>手动选点</h2><p>逐个姿态选择手部标记点并保存。进度实时落盘，可中途退出后继续。</p></div>
-              <div><strong>{{ annotatedCount }}/{{ episodes.length }}</strong><span>姿态已保存选点 · 有效模型点 {{ annotation.usable_point_count || 0 }}/{{ annotation.min_points || 3 }}</span></div>
+              <div><h2>手动选点</h2><p>先选择标定对象，再逐个姿态保存对应特征点。</p></div>
+              <div><strong>{{ annotatedCount }}/{{ episodes.length }}</strong><span>姿态已保存选点 · {{ generic ? '完成的特征点' : '有效模型点' }} {{ annotation.usable_point_count || 0 }}/{{ annotation.min_points || 3 }}</span></div>
             </div>
-            <iframe :key="iframeKey" :src="`${state?.ui_url || '/three-d-ui/'}?embedded=annotation`" title="3D点云手动选点操作台"></iframe>
+            <div class="object-options">
+              <label class="field">标定对象<select v-model="objectForm.mode"><option value="hand">已知手模型</option><option value="tool">普通刚性工具</option><option value="tcp">仅求TCP点</option></select></label>
+              <label v-if="objectForm.mode === 'hand'" class="field">几何模型<select v-model="objectForm.model_id"><option value="">请选择与实体一致的模型</option><option v-for="model in models.filter(m => m.side === job.arm)" :key="model.hand_id" :value="model.hand_id">{{ model.label }}</option></select></label>
+              <label v-else class="field">工具编号<input v-model.trim="objectForm.tool_id" placeholder="例如 probe-01" /></label>
+              <button class="btn" :disabled="!!busy" @click="selectObject">确认对象</button>
+            </div>
+            <ToolPointPicker v-if="generic" :job="job" :episodes="episodes" @updated="pointsUpdated" />
+            <iframe v-else-if="job.model_id" :key="iframeKey" :src="`${state?.ui_url || '/three-d-ui/'}?embedded=annotation&model_id=${encodeURIComponent(job.model_id)}`" title="3D点云手动选点操作台"></iframe>
             <div class="actions annotation-actions">
               <button class="btn ghost" :disabled="!!busy" @click="iframeKey += 1; refresh({ keepStep: true })">刷新选点进度</button>
               <button class="btn lg" :disabled="!!busy || !annotationReady" @click="finishAnnotation">选点完成，进入求解</button>
@@ -413,8 +437,8 @@ onUnmounted(() => clearInterval(timer))
           </article>
 
           <article v-else-if="step === 'solve'" class="card">
-            <h2 class="card-title">求解并检查手安装结果</h2>
-            <p>使用当前生效的2D相机外参，将点云选点转换到腕部坐标系，求解手安装位姿与TCP。</p>
+            <h2 class="card-title">求解并检查标定结果</h2>
+            <p>{{ generic ? '使用采集时的相机外参，将对应实体点转换到腕坐标系，计算TCP位置和跨姿态残差。' : '使用已选手模型，求解手安装位姿与TCP。' }}</p>
             <table class="plain"><tbody>
               <tr><th>数据目录</th><td class="mono path-cell">{{ job.run_dir }}</td></tr>
               <tr><th>采集姿态</th><td>{{ job.sample_count ?? episodes.length }}</td></tr>
@@ -425,7 +449,7 @@ onUnmounted(() => clearInterval(timer))
           </article>
 
           <article v-else class="card">
-            <h2 class="card-title">结果检查与归档生效</h2>
+            <h2 class="card-title">{{ generic ? '结果检查与本地归档' : '结果检查与归档生效' }}</h2>
             <div v-if="!result" class="alert warn">没有找到解算结果，请返回手动选点后重新求解。</div>
             <table v-else class="plain"><tbody>
               <tr><th>样本 / 标记点</th><td>{{ result.num_samples ?? result.sample_indices?.length ?? '—' }} / {{ result.point_count ?? result.tcp_points_wrist_m?.length ?? '—' }}</td></tr>
@@ -433,8 +457,15 @@ onUnmounted(() => clearInterval(timer))
               <tr><th>结果状态</th><td><span class="tag" :class="!mount.stale ? 'ok' : 'bad'">{{ mount.stale ? '选点已变化，需要重算' : '可归档' }}</span></td></tr>
             </tbody></table>
             <label class="field">归档运行名<input v-model.trim="archiveRunId" /></label>
-            <label class="field">实体手序列号（可选）<input v-model.trim="handSerial" placeholder="用于区分同型号实体手" /></label>
-            <div class="actions"><button class="btn ghost" @click="step = 'annotate'">返回修改选点</button><button class="btn lg" :disabled="!!busy || !result || mount.stale || job.finalized" @click="finalize">{{ job.finalized ? '已归档并生效' : '确认归档并生效' }}</button></div>
+            <template v-if="generic && result">
+              <table class="plain"><thead><tr><th>特征点（腕坐标系）</th><th>X / Y / Z（mm）</th></tr></thead><tbody>
+                <tr v-for="p in result.tcp_points_wrist_m" :key="p.point_id"><td>{{ p.point_id }}</td><td class="mono">{{ p.p_wrist_m.map(v => (v * 1000).toFixed(2)).join(' / ') }}</td></tr>
+              </tbody></table>
+              <p class="muted">{{ result.orientation_defined ? '工具坐标系已由三个特征点定义。' : '仅求得TCP位置，未定义工具朝向。' }}</p>
+            </template>
+            <p v-if="generic" class="muted">归档为独立工具TCP，可在标定记录下载。18000及云端的通用工具绑定尚未支持。</p>
+            <label v-else class="field">实体手序列号（可选）<input v-model.trim="handSerial" placeholder="用于区分同型号实体手" /></label>
+            <div class="actions"><button class="btn ghost" @click="step = 'annotate'">返回修改选点</button><button class="btn lg" :disabled="!!busy || !result || mount.stale || job.finalized" @click="finalize">{{ job.finalized ? '已归档' : generic ? '归档工具TCP' : '确认归档并生效' }}</button></div>
           </article>
         </main>
 
@@ -470,6 +501,7 @@ onUnmounted(() => clearInterval(timer))
 <style scoped>
 .hand-inner { max-width: 1280px; width: 100%; padding-top: 32px; }
 .hold-option { display: flex; align-items: center; gap: 8px; margin-top: 18px; }
+.object-options { display: flex; align-items: end; gap: 16px; flex-wrap: wrap; padding: 20px; }
 .page-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
 .page-message { margin-bottom: 16px; }
 .wizard-grid { display: grid; grid-template-columns: minmax(0, 1fr) 400px; gap: 20px; align-items: start; }

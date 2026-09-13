@@ -263,28 +263,30 @@ function roleLabel(id, m) {
           <tr v-if="!shownArtifacts.length"><td colspan="10" class="muted">还没有归档的产物</td></tr>
           <tr v-for="m in shownArtifacts" :key="m.path">
             <td class="nowrap">{{ TYPE_LABEL[m.type] || m.type }}</td>
-            <td>{{ roleLabel(m.camera_role, m) }}<div class="muted mono">{{ m.camera_serial }}</div></td>
+            <td>{{ m.subject?.tool_id || roleLabel(m.camera_role, m) }}<div class="muted mono">{{ m.camera_serial }}</div></td>
             <td class="mono nowrap">{{ m.run_id }}</td>
-            <td>{{ m.arm === 'left' ? '左' : '右' }}</td>
+            <td>{{ ['left', 'left_arm'].includes(m.arm) ? '左' : '右' }}</td>
             <td class="nowrap">
               <template v-if="m.type === 'extrinsic'">
                 内点 {{ m.quality?.num_inliers }} / {{ m.quality?.num_samples }}<br />
                 <span class="muted">平移 {{ fmt(m.quality?.residual_translation_mm?.mean) }} mm · 旋转 {{ fmt(m.quality?.residual_rotation_deg?.mean, 3) }}°</span>
               </template>
+              <template v-else-if="m.subject?.kind === 'tool'">RMS {{ fmt(m.quality?.rms) }} mm</template>
               <template v-else>{{ m.quality?.width }}×{{ m.quality?.height }}</template>
             </td>
             <td class="nowrap mono">{{ t(m.created_at) }}</td>
             <td><span class="tag" :class="STATUS[m.status]?.[1]">{{ STATUS[m.status]?.[0] || m.status }}</span></td>
             <td class="nowrap">
-              <a v-if="m.sync_state === 'synced' && remoteUrl(m)" class="tag ok link" :href="remoteUrl(m)" target="_blank" rel="noopener" :title="'云端查看 · ' + t(m.cloud?.pushed_at)">已同步 ↗</a>
+              <span v-if="m.local_only" class="tag">本地归档</span>
+              <a v-else-if="m.sync_state === 'synced' && remoteUrl(m)" class="tag ok link" :href="remoteUrl(m)" target="_blank" rel="noopener" :title="'云端查看 · ' + t(m.cloud?.pushed_at)">已同步 ↗</a>
               <span v-else class="tag" :class="SYNC[m.sync_state]?.[1]">{{ SYNC[m.sync_state]?.[0] || m.sync_state }}</span>
             </td>
             <td class="nowrap files">
               <a v-for="f in m.files" :key="f.name" class="file" :href="api.fileUrl(m.type, m.camera_role, m.run_id, f.name)" download>{{ f.name }}</a>
             </td>
             <td class="nowrap actions-cell">
-              <button v-if="m.status !== 'active'" class="btn ghost sm" :disabled="busy" @click="activate(m)">设为生效</button>
-              <button v-if="m.sync_state !== 'synced' && cloud?.settings?.configured" class="btn ghost sm" :disabled="busy" @click="pushOne(m)">推送</button>
+              <button v-if="!m.local_only && m.status !== 'active'" class="btn ghost sm" :disabled="busy" @click="activate(m)">设为生效</button>
+              <button v-if="!m.local_only && m.sync_state !== 'synced' && cloud?.settings?.configured" class="btn ghost sm" :disabled="busy" @click="pushOne(m)">推送</button>
               <button class="btn ghost sm danger-text" :disabled="busy" @click="removeArtifact(m)">删除</button>
             </td>
           </tr>

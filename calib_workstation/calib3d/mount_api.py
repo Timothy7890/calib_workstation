@@ -501,11 +501,13 @@ async def _require_active_combo(
             },
             status_code=409,
         )
-    if hint.get("hand_id") != hand_id:
+    context = getattr(state, "annotation_context", lambda: {})()
+    selected_model = context.get("model_id") if context.get("object_mode") == "hand" else None
+    if (selected_model or hint.get("hand_id")) != hand_id:
         return hint, None, JSONResponse(
             {
                 "ok": False,
-                "error": f"18000 激活手型号为 {hint.get('hand_id')}，当前选择为 {hand_id}",
+                "error": f"本次标定选择的模型为 {selected_model or hint.get('hand_id')}，当前选择为 {hand_id}",
             },
             status_code=409,
         )

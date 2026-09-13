@@ -65,6 +65,10 @@ export const api = {
   loadRun: (runId, arm) => request('POST', '/api/calibration/load-run', { run_id: runId, arm }),
 
   handCalibration: () => request('GET', '/api/hand-calibration'),
+  handModels: () => request('GET', '/three-d/api/hands'),
+  selectCalibrationObject: (body) => request('POST', '/api/hand-calibration/object', body),
+  pickToolPoint: (body) => request('POST', '/api/hand-calibration/tool-point', body),
+  removeToolPoint: (body) => request('POST', '/api/hand-calibration/tool-point/remove', body),
   handCalibrationPlans: (arm) =>
     request('GET', `/api/hand-calibration/plans${arm ? `?arm=${encodeURIComponent(arm)}` : ''}`),
   prepareHandCalibration: (payload) => request('POST', '/api/hand-calibration/prepare', payload),
