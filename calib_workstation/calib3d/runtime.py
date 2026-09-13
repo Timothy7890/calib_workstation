@@ -39,6 +39,9 @@ def configure(
     replay_runs = (data_root.parent / "calibration_replay_data" / "runs").resolve()
     episode_backend = None
     if not mock:
+        # 这是工作站自己的采集输出目录。首次部署时它尚不存在，而
+        # OfflineEpisodeBackend 是只读校验器，要求传入目录已经存在。
+        record_task_dir.mkdir(parents=True, exist_ok=True)
         episode_backend = OfflineEpisodeBackend(
             record_task_dir, rgbd_calibration_path, arm=arm
         )
