@@ -22,8 +22,22 @@ def install_object_routes(app, *, job, require_job, registry, extrinsic, store, 
             raise fail(409, "采集时使用的2D外参已变化，请重新准备任务")
         return manifest
 
+    async def restore_annotation_session(data):
+        check_context(data)
+        backend = engine._available_episode_backend()
+        if backend is None or Path(backend.task_dir).resolve() != Path(data["run_dir"]).resolve():
+            payload(await engine.api_offline_switch_task({"path": data["run_dir"]}))
+        if job().snapshot() != data:
+            raise fail(409, "载入期间任务已变化，请重新进入选点")
+
+    @app.post("/api/hand-calibration/annotation-session")
+    async def annotation_session():
+        data = require_job("annotating", "annotated", "solved")
+        await restore_annotation_session(data)
+        return {"ok": True, "job": data}
+
     @app.post("/api/hand-calibration/object")
-    def select_object(body: dict):
+    async def select_object(body: dict):
         data = require_job("annotating", "annotated", "solved")
         check_context(data)
         mode = body.get("mode")
@@ -39,12 +53,12 @@ def install_object_routes(app, *, job, require_job, registry, extrinsic, store, 
                 raise fail(422, str(exc)) from exc
             if model.spec.side != data["arm"]:
                 raise fail(409, "模型侧别与采集手臂不符")
-            existing = mount_api._load_mount_samples()
-            if any(s.get("hand_id") != model_id for s in existing):
-                raise fail(409, "已有其他模型的选点，请先在高级操作台删除旧选点，再切换模型；原始采集数据不受影响")
         tool_id = str(body.get("tool_id") or "").strip() if mode != "hand" else None
         if mode != "hand" and not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,47}", tool_id):
             raise fail(422, "工具编号请使用小写字母、数字、下划线或连字符（最多48字符）")
+        await restore_annotation_session(data)
+        if mode == "hand" and any(s.get("hand_id") != model_id for s in mount_api._load_mount_samples()):
+            raise fail(409, "已有其他模型的选点，请先在高级操作台删除旧选点，再切换模型；原始采集数据不受影响")
         same = data.get("object_mode") == mode and data.get("tool_id") == tool_id
         return {"ok": True, "job": job().update(
             object_mode=mode, model_id=model_id, tool_id=tool_id,

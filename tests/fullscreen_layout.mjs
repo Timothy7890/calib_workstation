@@ -22,6 +22,7 @@ try {
         replay: { state: 'completed', arm: { arm: 'left', engaged: true } }, active: { arm: 'left_arm' },
         episodes: [], tasks: [], annotation: {} })
       if (path === '/api/hand-calibration/object') return reply({ ok: true, job })
+      if (path === '/api/hand-calibration/annotation-session') return reply({ ok: true, job })
       if (path === '/three-d/api/hands') return reply({ hands: [{ hand_id: job.model_id, label: '强脑-Revo2-左', side: 'left' }] })
       if (path.startsWith('/api/calibration/')) throw new Error(`Unexpected control request: ${path}`)
       if (path.startsWith('/api/')) return reply({ plans: [], devices: [], roles: {} })

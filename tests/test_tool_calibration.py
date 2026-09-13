@@ -131,3 +131,34 @@ def test_hand_hold_uses_device_mapping_without_geometry_catalog(monkeypatch):
     result = asyncio.run(mount_api.api_mount_hand_hold_start({"hand_id": "qiangnao-revo2-left", "side": "right"}))
     assert result.status_code == 409
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("restore_fails", [False, True])
+def test_annotation_restores_saved_directory_without_resetting_points(tmp_path, monkeypatch, restore_fails):
+    job = Job(tmp_path / "job.json")
+    saved = job.update(step="annotating", arm="left", camera_role="head",
+        run_dir=str(tmp_path / "captured-left"), extrinsic_artifact_id="camera-1",
+        object_mode="tcp", tool_id="probe", tool_samples=[{"point_id": "tcp", "episode": "episode_0000"}])
+    backend = SimpleNamespace(task_dir=tmp_path / "default-right")
+    switches = []
+    async def switch(body):
+        switches.append(body["path"])
+        if restore_fails:
+            raise HTTPException(409, "采集任务不可载入")
+        backend.task_dir = body["path"]
+        return {"ok": True}
+    monkeypatch.setattr(engine, "_available_episode_backend", lambda: backend)
+    monkeypatch.setattr(engine, "api_offline_switch_task", switch)
+    app = FastAPI()
+    install_object_routes(app, job=lambda: job, require_job=lambda *args: job.snapshot(),
+        registry=lambda: {"active": {"arm": "left_arm"}},
+        extrinsic=lambda role: {"artifact_id": "camera-1"}, store=lambda: None,
+        fail=lambda code, message: HTTPException(code, message), payload=lambda x: x)
+    with TestClient(app) as client:
+        response = client.post("/api/hand-calibration/annotation-session")
+        assert response.status_code == (409 if restore_fails else 200)
+        assert switches == [saved["run_dir"]]
+        assert job.snapshot() == saved
+        if not restore_fails:
+            assert client.post("/api/hand-calibration/annotation-session").status_code == 200
+            assert len(switches) == 1

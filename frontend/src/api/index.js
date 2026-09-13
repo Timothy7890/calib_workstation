@@ -31,6 +31,7 @@ async function request(method, path, body) {
 }
 
 export const api = {
+  restoreAnnotationSession: () => request('POST', '/api/hand-calibration/annotation-session'),
   config: () => request('GET', '/api/config'),
   health: () => request('GET', '/api/health'),
   robot: () => request('GET', '/api/robot'),

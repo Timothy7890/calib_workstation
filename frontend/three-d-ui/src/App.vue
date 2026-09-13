@@ -1902,7 +1902,7 @@ async function loadWorkspace() {
     }
     activeColor.value = episodeSamples.value[0]?.color || selectableColors.value[0]?.color || ''
     if (!episodes.value.length) {
-      infoMsg.value = '暂无 episode，请先在 7012 按 C 采集当前姿态，再点此页面的刷新按钮。'
+      infoMsg.value = '当前目录没有采集数据，请在18005载入已拍摄任务，或在左侧选择正确的采集目录后刷新。'
     }
   } catch (error) {
     setError(error)
@@ -2184,7 +2184,7 @@ onBeforeUnmount(() => {
             </small>
           </button>
           <p v-if="!episodes.length" class="empty-state">
-            暂无 episode。请先在 7012 按 C 采集当前姿态，再点击上方刷新。
+            当前目录没有采集数据。请返回18005载入已拍摄任务，或选择正确的采集目录后刷新。
           </p>
         </div>
       </aside>
