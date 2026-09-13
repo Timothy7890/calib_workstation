@@ -507,11 +507,37 @@ def create_app(config: Config) -> FastAPI:
             raise fail(500, "3D引擎返回了无效响应")
         return response
 
+    async def hand_annotation_state(episodes: list[dict[str, Any]]) -> dict[str, Any]:
+        """Summarize the mount samples that belong to the currently selected episodes."""
+        payload = local_3d_payload(await calib3d_mount.api_mount_samples())
+        episode_names = {str(item.get("name")) for item in episodes if item.get("name")}
+        samples = [
+            item for item in (payload.get("samples") or [])
+            if str(item.get("pose_id") or "") in episode_names
+        ]
+        counts: dict[str, int] = {}
+        for sample in samples:
+            pose_id = str(sample.get("pose_id") or "")
+            counts[pose_id] = counts.get(pose_id, 0) + 1
+        for episode in episodes:
+            episode["mount_sample_count"] = counts.get(str(episode.get("name") or ""), 0)
+        usable = [sample for sample in samples if sample.get("p_hand") is not None]
+        return {
+            "sample_count": len(samples),
+            "pose_count": len(counts),
+            "usable_sample_count": len(usable),
+            "usable_point_count": len({sample.get("point_id") for sample in usable}),
+            "min_points": int(payload.get("min_points") or 3),
+        }
+
     @app.get("/api/hand-calibration")
     async def api_hand_calibration(request: Request):
         registry = capability_registry()
         active = registry.get("active") or {}
-        role = str(active.get("camera_role") or "head")
+        current_job = job().snapshot()
+        if current_job.get("calibration_kind") != "3d":
+            current_job = {}
+        role = str(current_job.get("camera_role") or active.get("camera_role") or "head")
         remembered = ws.cameras.get(role) or {}
         serial = str(remembered.get("serial") or "")
         if serial and calib3d_camera.supports(serial) and calib3d_camera.serial != serial:
@@ -522,6 +548,17 @@ def create_app(config: Config) -> FastAPI:
             artifact_type: active_camera_manifest(artifact_type, role)
             for artifact_type in ("extrinsic", "intrinsic", "camera_transform")
         }
+        try:
+            replay_state = replay.get("/api/status")
+        except ServiceError as exc:
+            replay_state = {"state": "unavailable", "message": str(exc)}
+        tasks = local_3d_payload(await calib3d_app.api_offline_tasks())
+        try:
+            episodes = local_3d_payload(await calib3d_app.api_offline_episodes())
+        except HTTPException:
+            episodes = {"episodes": [], "count": 0, "invalid_episodes": []}
+        episode_items = episodes.get("episodes") or []
+        annotation = await hand_annotation_state(episode_items)
         return {
             "ok": True,
             "service": {"ok": ok3d, "error": error3d},
@@ -530,25 +567,167 @@ def create_app(config: Config) -> FastAPI:
             "camera_role": role,
             "camera_artifacts": current,
             "mount": mount,
+            "job": current_job,
+            "replay": replay_state,
+            "tasks": tasks.get("tasks") or [],
+            "episodes": episode_items,
+            "invalid_episodes": episodes.get("invalid_episodes") or [],
+            "annotation": annotation,
             "ui_url": "/three-d-ui/",
         }
 
-    @app.post("/api/hand-calibration/solve")
-    async def api_hand_calibration_solve(body: dict):
+    def require_hand_job(*steps: str) -> dict[str, Any]:
+        data = job().snapshot()
+        if data.get("calibration_kind") != "3d":
+            raise fail(409, "还没有准备好的3D标定任务")
+        if steps and data.get("step") not in steps:
+            raise fail(409, f"当前步骤是 {data.get('step')}，不能执行此操作")
+        return data
+
+    def validate_hand_context(role_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
         registry = capability_registry()
         active = registry.get("active") or {}
-        role = str(body.get("camera_role") or active.get("camera_role") or "head")
+        arm = str(active.get("arm") or "")
+        hand_id = str(active.get("hand_id") or "")
+        if arm not in ("left_arm", "right_arm") or not hand_id:
+            raise fail(409, "请先在18000选择当前激活臂和手型号")
+        extrinsic = active_camera_manifest("extrinsic", role_id)
+        if extrinsic is None:
+            raise fail(409, f"{role_label(role_id)}还没有生效的2D外参")
+        return active, extrinsic
+
+    @app.post("/api/hand-calibration/prepare")
+    async def api_hand_calibration_prepare(body: dict):
+        role = camera_role(str(body.get("camera_role") or ""))
+        active, extrinsic = validate_hand_context(role.id)
+        arm = str(body.get("arm") or "")
+        if arm not in ARMS or active.get("arm") != f"{arm}_arm":
+            raise fail(409, f"所选手臂必须与18000当前激活臂 {active.get('arm') or '未选择'} 一致")
+        serial = str(body.get("camera_serial") or ws.camera_serial(role.id) or "").strip()
+        if not serial:
+            raise fail(422, "请选择相机序列号")
+        if not calib3d_camera.supports(serial):
+            expected = getattr(calib3d_camera.calibration, "serial", None)
+            raise fail(409, f"相机 {serial} 没有匹配的RGB-D标定（当前标定属于 {expected}）")
+        extrinsic_serial = str((extrinsic.get("compatibility") or {}).get("camera_serial") or "")
+        if extrinsic_serial and serial != extrinsic_serial:
+            raise fail(409, f"当前2D外参属于相机 {extrinsic_serial}，不能用于相机 {serial}")
+        plan_id = str(body.get("plan_id") or "")
+        if not plan_id:
+            raise fail(422, "请选择3D采集计划")
+        replay_state = replay.get("/api/status")
+        if replay_state.get("state") in {"moving", "settling", "capturing", "returning", "paused", "preflight"} or (replay_state.get("arm") or {}).get("engaged"):
+            raise fail(409, "回放服务仍在运行或已接管手臂，请先停止并解除接管")
+        plan = replay.get(f"/api/plans/{plan_id}")
+        if plan.get("target") != "hand_eye_3D":
+            raise fail(409, f"计划 {plan.get('name')} 不是3D采集计划")
+        if plan.get("arm") != arm:
+            raise fail(409, f"计划属于 {plan.get('arm')} 臂，与所选 {arm} 臂不符")
+        if plan.get("draft"):
+            raise fail(409, f"计划 {plan.get('name')} 还是草稿，请先完成原点和轨迹校验")
+        canonical_url = config.hand_eye_2d_url + "/three-d"
+        if plan.get("base_url") != canonical_url or plan.get("camera_serial") != serial:
+            plan["base_url"] = canonical_url
+            plan["camera_serial"] = serial
+            plan = replay.put(f"/api/plans/{plan_id}", plan)
+        camera = api_native_camera_select({"serial": serial, "camera_role": role.id})
+        if calib3d_camera.serial != serial:
+            raise fail(409, f"3D相机 {serial} 未能启用RGB-D数据")
+        ws.remember_camera(role.id, serial, str((camera.get("camera") or {}).get("name") or ""))
+        job().reset()
+        return {"ok": True, "job": job().update(
+            calibration_kind="3d", source="capture", step="prepared",
+            camera_role=role.id, camera_label=role.label, camera_serial=serial,
+            arm=arm, hand_id=active.get("hand_id"), plan_id=plan_id,
+            plan_name=plan.get("name"), sample_total=sum(
+                1 for node in plan.get("nodes") or []
+                if node.get("enabled", True) and node.get("role") == "sample"
+            ),
+            extrinsic_artifact_id=extrinsic.get("artifact_id"),
+            run_id=None, run_dir=None, solved=False, finalized=False,
+        )}
+
+    @app.post("/api/hand-calibration/load-task")
+    async def api_hand_calibration_load_task(body: dict):
+        role = camera_role(str(body.get("camera_role") or ""))
+        active, extrinsic = validate_hand_context(role.id)
+        path = str(body.get("path") or "").strip()
+        if not path:
+            raise fail(422, "请选择已拍摄的数据目录")
+        replay_state = replay.get("/api/status")
+        if replay_state.get("state") in {"moving", "settling", "capturing", "returning", "paused", "preflight"} or (replay_state.get("arm") or {}).get("engaged"):
+            raise fail(409, "回放服务仍在运行或已接管手臂，请先停止并解除接管")
+        switched = local_3d_payload(await calib3d_app.api_offline_switch_task({"path": path}))
+        arm = str(switched.get("arm") or "")
+        if active.get("arm") != f"{arm}_arm":
+            raise fail(409, f"数据属于 {arm} 臂，但18000当前激活的是 {active.get('arm')}")
+        scanned = local_3d_payload(await calib3d_app.api_offline_episodes())
+        episodes = scanned.get("episodes") or []
+        if not episodes:
+            raise fail(409, "所选目录没有可用的3D episode")
+        serials = {str(item.get("camera_serial")) for item in episodes if item.get("camera_serial")}
+        expected_serial = getattr(calib3d_camera.calibration, "serial", None)
+        if len(serials) > 1:
+            raise fail(409, f"数据目录混有多台相机: {sorted(serials)}")
+        if serials and expected_serial and serials != {expected_serial}:
+            raise fail(409, f"数据相机 {next(iter(serials))} 与RGB-D标定 {expected_serial} 不一致")
+        extrinsic_serial = str((extrinsic.get("compatibility") or {}).get("camera_serial") or "")
+        if serials and extrinsic_serial and serials != {extrinsic_serial}:
+            raise fail(409, f"数据相机 {next(iter(serials))} 与当前2D外参相机 {extrinsic_serial} 不一致")
+        annotation = await hand_annotation_state(episodes)
+        job().reset()
+        return {"ok": True, "job": job().update(
+            calibration_kind="3d", source="existing", step="annotating",
+            camera_role=role.id, camera_label=role.label,
+            camera_serial=next(iter(serials), expected_serial), arm=arm,
+            hand_id=active.get("hand_id"), plan_id=None, plan_name=None,
+            extrinsic_artifact_id=extrinsic.get("artifact_id"),
+            run_id=Path(path).name, run_dir=str(Path(path).resolve()),
+            sample_count=len(episodes), solved=False, finalized=False,
+        ), "episodes": episodes, "annotation": annotation}
+
+    @app.post("/api/hand-calibration/annotation-complete")
+    async def api_hand_calibration_annotation_complete():
+        require_hand_job("annotating", "annotated", "solved")
+        scanned = local_3d_payload(await calib3d_app.api_offline_episodes())
+        episodes = scanned.get("episodes") or []
+        annotation = await hand_annotation_state(episodes)
+        if annotation["usable_point_count"] < annotation["min_points"]:
+            raise fail(
+                409,
+                "有效模型点不足：当前 "
+                f"{annotation['usable_point_count']} 个，至少需要 {annotation['min_points']} 个；"
+                "请在操作台保存实体点，并为相应槽位配置模型点",
+            )
+        return {"ok": True, "job": job().update(
+            step="annotated", annotated_count=annotation["pose_count"],
+            annotated_point_count=annotation["usable_point_count"], sample_count=len(episodes)
+        ), "annotation": annotation}
+
+    @app.post("/api/hand-calibration/solve")
+    async def api_hand_calibration_solve(body: dict):
+        current_job = require_hand_job("annotated", "solved")
+        registry = capability_registry()
+        active = registry.get("active") or {}
+        if active.get("arm") != f"{current_job.get('arm')}_arm" or active.get("hand_id") != current_job.get("hand_id"):
+            raise fail(409, "18000当前手/臂与采集任务不一致，请恢复原组合后再求解")
+        role = str(current_job.get("camera_role") or "head")
         camera_role(role)
         extrinsic = active_camera_manifest("extrinsic", role)
         if extrinsic is None:
             raise fail(409, f"{role_label(role)}还没有生效的 2D 外参")
+        if extrinsic.get("artifact_id") != current_job.get("extrinsic_artifact_id"):
+            raise fail(409, "当前生效的2D外参已在任务准备后变化，请重新开始3D标定")
         calib_path = Path(extrinsic["path"]) / str(extrinsic.get("primary_file") or "handeye_result_left.json")
-        return local_3d_payload(
+        result = local_3d_payload(
             await calib3d_mount.api_mount_solve({"calib_path": str(calib_path)})
         )
+        job().update(step="solved", solved=True)
+        return result
 
     @app.post("/api/hand-calibration/finalize")
     async def api_hand_calibration_finalize(body: dict):
+        current_job = require_hand_job("solved", "finalized")
         run_id = str(body.get("run_id") or "").strip()
         if not _RUN_NAME_RE.match(run_id):
             raise fail(422, "运行名不能为空，只能含 Unicode 字母/数字及 . _ -，且不能以 . 开头")
@@ -558,11 +737,15 @@ def create_app(config: Config) -> FastAPI:
         hand_id = str(active.get("hand_id") or "")
         if arm not in ("left_arm", "right_arm") or not hand_id:
             raise fail(409, "18000 尚未选择有效的激活臂和手型号")
-        role = str(body.get("camera_role") or active.get("camera_role") or "head")
+        if arm != f"{current_job.get('arm')}_arm" or hand_id != current_job.get("hand_id"):
+            raise fail(409, "18000当前手/臂与解算任务不一致，请恢复原组合后再归档")
+        role = str(current_job.get("camera_role") or "head")
         camera_role(role)
         extrinsic = active_camera_manifest("extrinsic", role)
         if extrinsic is None:
             raise fail(409, f"{role_label(role)}还没有生效的 2D 外参")
+        if extrinsic.get("artifact_id") != current_job.get("extrinsic_artifact_id"):
+            raise fail(409, "当前生效的2D外参已在任务准备后变化，请重新开始3D标定")
         mount_payload = local_3d_payload(await calib3d_mount.api_mount_result())
         result = mount_payload.get("result")
         if not isinstance(result, dict):
@@ -625,6 +808,8 @@ def create_app(config: Config) -> FastAPI:
             "artifacts": {kind: manifest["artifact_id"] for kind, manifest in selected.items()},
         })
         auto_push()
+        job().update(step="finalized", finalized=True, run_id=run_id,
+                     artifacts={kind: manifest.get("artifact_id") for kind, manifest in selected.items()})
         return {
             "ok": True,
             "run_id": run_id,
@@ -661,12 +846,11 @@ def create_app(config: Config) -> FastAPI:
 
     # ---------------- 计划 ----------------
 
-    def _plans_for(role_id: str, arm: str | None = None) -> list[dict[str, Any]]:
-        role = camera_role(role_id)
+    def _plans_for_target(target: str, arm: str | None = None) -> list[dict[str, Any]]:
         plans = replay.get("/api/plans").get("plans", [])
         out = []
         for plan in plans:
-            if plan.get("target") != role.target:
+            if plan.get("target") != target:
                 continue
             if arm and plan.get("arm") != arm:
                 continue
@@ -680,9 +864,18 @@ def create_app(config: Config) -> FastAPI:
             })
         return out
 
+    def _plans_for(role_id: str, arm: str | None = None) -> list[dict[str, Any]]:
+        return _plans_for_target(camera_role(role_id).target, arm)
+
     @app.get("/api/plans")
     def api_plans(camera_role_id: str, arm: str | None = None):
         return {"plans": _plans_for(camera_role_id, arm)}
+
+    @app.get("/api/hand-calibration/plans")
+    def api_hand_calibration_plans(arm: str | None = None):
+        if arm is not None and arm not in ARMS:
+            raise fail(422, "arm 只能是 left 或 right")
+        return {"plans": _plans_for_target("hand_eye_3D", arm)}
 
     # ---------------- 向导：准备 → 接管 → 归位 → 运行 → 求解 → 生效 ----------------
 
@@ -745,7 +938,7 @@ def create_app(config: Config) -> FastAPI:
 
         job().reset()
         return {"ok": True, "job": job().update(
-            step="prepared", camera_role=role.id, camera_label=role.label, target=role.target,
+            calibration_kind="2d", step="prepared", camera_role=role.id, camera_label=role.label, target=role.target,
             arm=arm, camera_serial=serial, plan_id=plan_id, plan_name=plan.get("name"),
             on_missing_corners=on_missing,
             camera=camera.get("camera"), run_id=None, run_dir=None,
@@ -820,7 +1013,7 @@ def create_app(config: Config) -> FastAPI:
         return replay.post("/api/control/stop")
 
     @app.post("/api/calibration/mark-captured")
-    def api_mark_captured():
+    async def api_mark_captured():
         """运行结束（completed / stopped）后前端调用，进入求解步骤。"""
         data = _require_job()
         status = replay.get("/api/status")
@@ -829,6 +1022,18 @@ def create_app(config: Config) -> FastAPI:
         run_dir = data.get("run_dir") or status.get("run_dir")
         if not run_dir:
             raise fail(409, "没有运行目录，请先运行采集")
+        if data.get("calibration_kind") == "3d" or data.get("target") == "hand_eye_3D":
+            n = len(list(Path(run_dir).glob("episode_*/data.json")))
+            if n < 1:
+                raise fail(409, "本次运行没有生成有效的3D episode")
+            # 自动轨迹已经返回原点；进入离线点选前释放18004的手臂控制。
+            if (status.get("arm") or {}).get("engaged"):
+                replay.post("/api/control/disarm")
+            local_3d_payload(await calib3d_app.api_offline_switch_task({"path": str(run_dir)}))
+            return {"ok": True, "job": job().update(
+                step="annotating", run_dir=str(run_dir), sample_count=n,
+                outcome=status.get("state"), solved=False, finalized=False,
+            )}
         n = len(list((Path(run_dir) / "joints").glob("*.json"))) if (Path(run_dir) / "joints").is_dir() else 0
         caps = status.get("captures") or []
         skipped = sum(1 for c in caps if c.get("skipped"))

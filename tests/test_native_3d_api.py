@@ -1,7 +1,11 @@
+import json
+
 from fastapi.testclient import TestClient
 
+import calib_workstation.app as workstation_app
 from calib_workstation.app import create_app
 from calib_workstation.config import load_config
+from calib_workstation.manifest import ArtifactStore
 
 
 def test_2d_and_3d_share_one_managed_rgbd_pipeline(tmp_path):
@@ -34,3 +38,93 @@ def test_2d_and_3d_share_one_managed_rgbd_pipeline(tmp_path):
         assert len(states) == 1
         assert states[0].serial == "MOCK-HEAD-0001"
         assert states[0].consumers == ("calib2d", "calib3d")
+
+
+def test_3d_wizard_prepares_automatic_capture_with_active_context(tmp_path, monkeypatch):
+    plan = {
+        "id": "plan-3d", "name": "3D right", "target": "hand_eye_3D",
+        "base_url": "http://127.0.0.1:18005/three-d", "arm": "right",
+        "camera_serial": None, "draft": False,
+        "nodes": [
+            {"id": "home", "role": "home", "enabled": True},
+            {"id": "sample", "role": "sample", "enabled": True},
+        ],
+    }
+
+    class FakeHttpClient:
+        def __init__(self, name, _base_url):
+            self.name = name
+
+        def get(self, path, **_kwargs):
+            if "能力中心" in self.name:
+                return {"registry": {
+                    "active": {"arm": "right_arm", "hand_id": "hand-r", "camera_role": "head"},
+                    "hands": [{"id": "hand-r", "name": "Right hand"}],
+                }}
+            if path == "/api/status":
+                return {"state": "idle", "arm": {"arm": "right", "engaged": False}, "captures": []}
+            if path == "/api/plans":
+                return {"plans": [dict(plan)]}
+            if path == "/api/plans/plan-3d":
+                return dict(plan)
+            raise AssertionError(path)
+
+        def post(self, _path, _body=None, **_kwargs):
+            return {"ok": True}
+
+        def put(self, path, body, **_kwargs):
+            assert path == "/api/plans/plan-3d"
+            plan.update(body)
+            return dict(plan)
+
+        def reachable(self, _path="/api/status"):
+            return True, ""
+
+    monkeypatch.setattr(workstation_app, "HttpClient", FakeHttpClient)
+    config = load_config(mock=True)
+    config.data_root = tmp_path / "data"
+    app = create_app(config)
+
+    with TestClient(app) as client:
+        assert client.put("/api/robot", json={"unit_code": "H2-TEST"}).status_code == 200
+        run_dir = tmp_path / "solved-2d"
+        run_dir.mkdir()
+        (run_dir / "handeye_result_left.json").write_text(json.dumps({
+            "base_link": "torso_link", "tip_link": "right_wrist_yaw_link",
+            "T_cam2base": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
+        }), encoding="utf-8")
+        (run_dir / "camera_intrinsics.json").write_text(json.dumps({
+            "serial": "MOCK-HEAD-0001", "width": 640, "height": 480,
+        }), encoding="utf-8")
+        store = ArtifactStore(
+            config.data_root / "H2-TEST" / "calibrations",
+            unit_code="H2-TEST", vendor=config.vendor, model=config.model,
+        )
+        artifacts = store.finalize_2d_run(
+            run_dir=run_dir, camera_role="head", run_id="camera-1", arm="right_arm",
+        )
+        for artifact_type in artifacts:
+            store.set_active(artifact_type, "head", "camera-1")
+
+        plans = client.get("/api/hand-calibration/plans?arm=right")
+        assert plans.status_code == 200
+        assert plans.json()["plans"][0]["id"] == "plan-3d"
+
+        prepared = client.post("/api/hand-calibration/prepare", json={
+            "camera_role": "head", "arm": "right",
+            "camera_serial": "MOCK-HEAD-0001", "plan_id": "plan-3d",
+        })
+        assert prepared.status_code == 200
+        job = prepared.json()["job"]
+        assert job["calibration_kind"] == "3d"
+        assert job["step"] == "prepared"
+        assert job["sample_total"] == 1
+        assert job["hand_id"] == "hand-r"
+
+        overview = client.get("/api/hand-calibration")
+        assert overview.status_code == 200
+        assert overview.json()["annotation"]["usable_point_count"] == 0
+
+        solve = client.post("/api/hand-calibration/solve", json={"camera_role": "head"})
+        assert solve.status_code == 409
+        assert "当前步骤" in solve.json()["detail"]["message"]

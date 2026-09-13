@@ -65,6 +65,11 @@ export const api = {
   loadRun: (runId, arm) => request('POST', '/api/calibration/load-run', { run_id: runId, arm }),
 
   handCalibration: () => request('GET', '/api/hand-calibration'),
+  handCalibrationPlans: (arm) =>
+    request('GET', `/api/hand-calibration/plans${arm ? `?arm=${encodeURIComponent(arm)}` : ''}`),
+  prepareHandCalibration: (payload) => request('POST', '/api/hand-calibration/prepare', payload),
+  loadHandCalibrationTask: (payload) => request('POST', '/api/hand-calibration/load-task', payload),
+  finishHandAnnotation: () => request('POST', '/api/hand-calibration/annotation-complete'),
   solveHandCalibration: (cameraRole) =>
     request('POST', '/api/hand-calibration/solve', { camera_role: cameraRole }),
   finalizeHandCalibration: (payload) => request('POST', '/api/hand-calibration/finalize', payload),

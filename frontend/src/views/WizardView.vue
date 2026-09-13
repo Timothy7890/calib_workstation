@@ -62,6 +62,7 @@ const captures = computed(() => replay.value?.captures || [])
 const sampleTotal = computed(() => plans.value.find((p) => p.id === job.value.plan_id)?.sample_count ?? job.value.sample_total ?? null)
 
 function stepFromJob(j) {
+  if (j?.calibration_kind && j.calibration_kind !== '2d') return 'setup'
   switch (j?.step) {
     case 'prepared':
     case 'engaged':
@@ -107,7 +108,10 @@ async function refresh() {
     const s = await api.calibration()
     if (seq !== refreshSeq) return
     // 期间有按钮动作直接写过 job（版本变了），就不用这份旧快照覆盖它
-    if (jobVersion === versionAtStart) job.value = s.job || {}
+    if (jobVersion === versionAtStart) {
+      const incoming = s.job || {}
+      job.value = !incoming.calibration_kind || incoming.calibration_kind === '2d' ? incoming : {}
+    }
     replay.value = s.replay
     session.value = s.session
     if (s.replay_error) notice.value = s.replay_error
