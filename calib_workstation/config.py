@@ -35,6 +35,8 @@ class Config:
     hand_eye_3d_ui_url: str
     replay_url: str
     capability_url: str
+    rgbd_calibration_path: Path
+    robot_urdf_path: Path
     data_root: Path
     cameras: dict[str, CameraRole]
     board_size: str = "11x8"
@@ -67,6 +69,8 @@ class Config:
                 for role in self.cameras.values()
             },
             "board": {"size": self.board_size, "square_size_mm": self.square_size_mm},
+            "rgbd_calibration_path": str(self.rgbd_calibration_path),
+            "robot_urdf_path": str(self.robot_urdf_path),
             "mock": self.mock,
         }
 
@@ -98,14 +102,23 @@ def load_config(path: str | Path | None = None, *, mock: bool = False) -> Config
         raise ValueError("cameras 至少要配置 head 或 waist 一个")
 
     board = raw.get("board") or {}
+    camera = raw.get("camera") or {}
     return Config(
         vendor=str(robot.get("vendor") or "unitree"),
         model=str(robot.get("model") or "h2"),
-        hand_eye_2d_url=str(services.get("hand_eye_2d") or "http://127.0.0.1:8131").rstrip("/"),
+        hand_eye_2d_url=str(services.get("hand_eye_2d") or "http://127.0.0.1:18005").rstrip("/"),
         hand_eye_3d_url=str(services.get("hand_eye_3d") or "http://127.0.0.1:8132").rstrip("/"),
         hand_eye_3d_ui_url=str(services.get("hand_eye_3d_ui") or "http://127.0.0.1:7013").rstrip("/"),
         replay_url=str(services.get("replay") or "http://127.0.0.1:18004").rstrip("/"),
         capability_url=str(services.get("capability") or "http://127.0.0.1:18000").rstrip("/"),
+        rgbd_calibration_path=Path(
+            camera.get("rgbd_calibration")
+            or "/home/robot/yx/project/IK_replay/config/camera/orbbec_rgbd_calibration.json"
+        ).expanduser().resolve(),
+        robot_urdf_path=Path(
+            robot.get("urdf")
+            or "/home/robot/yx/project/IK_replay/assets/robots/h2/robot.urdf"
+        ).expanduser().resolve(),
         data_root=Path(raw.get("data_root") or "./calib_workstation_data").expanduser().resolve(),
         cameras=cameras,
         board_size=str(board.get("size") or "11x8"),

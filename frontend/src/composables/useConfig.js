@@ -28,7 +28,7 @@ export function useConfig() {
   return { config, error, reload: load }
 }
 
-// 8131 的图像流地址：ws://<浏览器访问的主机>:8131/ws/stream
+// 18005 原生图像流地址：ws://<浏览器访问的主机>:18005/ws/stream
 export function streamUrl(cfg) {
   const base = cfg?.services_public?.hand_eye_2d
   if (!base) return ''

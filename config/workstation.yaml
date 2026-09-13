@@ -3,13 +3,18 @@
 robot:
   vendor: unitree
   model: h2
+  urdf: /home/robot/yx/project/IK_replay/assets/robots/h2/robot.urdf
 
 services:
-  hand_eye_2d: http://127.0.0.1:8131      # 2D 相机 + 采集 + 求解
+  hand_eye_2d: http://127.0.0.1:18005     # 原生2D兼容API与图像流（由18005自身提供）
   replay: http://127.0.0.1:18004          # 轨迹回放（人工监护）
   hand_eye_3d: http://127.0.0.1:8132      # 3D 采集/求解（start.sh --3d 时拉起）
   hand_eye_3d_ui: http://127.0.0.1:7013   # 3D 点云/手安装操作台（嵌入工作站）
   capability: http://127.0.0.1:18000      # 能力中心
+
+camera:
+  # 同一份生产RGB-D Profile/内外参约束供统一CameraManager和3D深度对齐使用
+  rgbd_calibration: /home/robot/yx/project/IK_replay/config/camera/orbbec_rgbd_calibration.json
 
 # 产物根目录；实际落 <data_root>/<unit_code>/calibrations/<type>/<camera_role>/<run_id>/
 data_root: /home/robot/yx/project/calib/calib_workstation_data

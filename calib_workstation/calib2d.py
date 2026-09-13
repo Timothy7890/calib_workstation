@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 import threading
 import time
 from datetime import datetime
@@ -26,7 +28,8 @@ JOINT_NAMES = {
 class Calib2DEngine:
     consumer = "calib2d"
 
-    def __init__(self, manager: CameraManager, sessions_root: Path, board_size=(11, 8)):
+    def __init__(self, manager: CameraManager, sessions_root: Path, board_size=(11, 8),
+                 urdf_path: Path | None = None):
         self.manager = manager
         self.sessions_root = sessions_root.resolve()
         self.board_size = tuple(board_size)
@@ -38,6 +41,10 @@ class Calib2DEngine:
         self.arm = "right"
         self.capture_count = 0
         self.capture_ids: dict[str, dict[str, Any]] = {}
+        self.urdf_path = urdf_path
+        self.solve_job: dict[str, Any] = {
+            "running": False, "session": "", "log": [], "result": None, "error": ""}
+        self.solve_lock = threading.Lock()
 
     def select(self, role: str, serial: str) -> dict[str, Any]:
         with self.lock:
@@ -58,6 +65,7 @@ class Calib2DEngine:
             "width": color.get("width"), "height": color.get("height"),
             "fps": color.get("fps"), "format": color.get("format"),
             "source": "workstation_camera_manager",
+            "single_camera": True,
         }
 
     def start_session(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -155,6 +163,70 @@ class Calib2DEngine:
             "arm_selectable": True, "board_size": f"{self.board_size[0]}x{self.board_size[1]}",
             "camera": self.camera_info(), "recording": {"enabled": True, "arm_selectable": True},
         }
+
+    def solve(self, body: dict[str, Any]) -> dict[str, Any]:
+        with self.solve_lock:
+            if self.solve_job["running"]:
+                raise RuntimeError(f"已有求解在运行: {self.solve_job['session']}")
+        data_dir = Path(str(body.get("session") or "")).expanduser().resolve()
+        intrinsics = data_dir / "camera_intrinsics.json"
+        if not data_dir.is_dir() or not (data_dir / "joints").is_dir():
+            raise ValueError(f"无效的采集目录 {data_dir}")
+        if not intrinsics.is_file():
+            raise ValueError(f"缺少内参文件 {intrinsics}")
+        if self.urdf_path is None or not self.urdf_path.is_file():
+            raise ValueError(f"机器人URDF不存在: {self.urdf_path}")
+        square = float(body.get("square_size_mm") or 0)
+        if not 0.1 < square < 1000:
+            raise ValueError("square_size_mm 无效")
+        method = str(body.get("method") or "park")
+        if method not in ("tsai", "park", "horaud", "andreff", "daniilidis"):
+            raise ValueError(f"未知求解方法 {method}")
+        meta = json.loads((data_dir / "session_meta.json").read_text())
+        tip_link = str(meta.get("tip_link") or f"{meta.get('arm', 'right')}_wrist_yaw_link")
+        cmd = [
+            sys.executable, "-u", "-m", "calib_workstation.solve_handeye",
+            "--data", str(data_dir), "--intrinsics", str(intrinsics),
+            "--urdf", str(self.urdf_path), "--board-size", str(body.get("board_size") or "11x8"),
+            "--square-size", str(square), "--base-link", "torso_link",
+            "--tip-link", tip_link, "--method", method, "--eye", "left",
+        ]
+        with self.solve_lock:
+            self.solve_job.update({
+                "running": True, "session": str(body.get("session")),
+                "session_dir": str(data_dir), "log": ["$ " + " ".join(cmd)],
+                "result": None, "error": "",
+            })
+        threading.Thread(target=self._run_solver, args=(cmd, data_dir), daemon=True).start()
+        return {"success": True, "session": str(body.get("session"))}
+
+    def solve_status(self) -> dict[str, Any]:
+        with self.solve_lock:
+            return {**self.solve_job, "log": list(self.solve_job["log"]),
+                    "urdf": str(self.urdf_path), "base_link": "torso_link"}
+
+    def _run_solver(self, cmd: list[str], data_dir: Path):
+        try:
+            process = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1)
+            assert process.stdout is not None
+            for line in process.stdout:
+                with self.solve_lock:
+                    self.solve_job["log"].append(line.rstrip())
+            code = process.wait()
+            result_path = data_dir / "handeye_result_left.json"
+            result = json.loads(result_path.read_text()) if result_path.is_file() else None
+            with self.solve_lock:
+                self.solve_job["result"] = ({"left": result} if result else None)
+                if code != 0 and result is None:
+                    self.solve_job["error"] = f"求解进程退出码 {code}"
+        except Exception as exc:
+            with self.solve_lock:
+                self.solve_job["error"] = str(exc)
+        finally:
+            with self.solve_lock:
+                self.solve_job["running"] = False
 
     def _frame(self):
         if not self.role or not self.serial:

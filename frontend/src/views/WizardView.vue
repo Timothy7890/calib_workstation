@@ -169,7 +169,7 @@ async function previewCamera() {
   }
   busy.value = true
   try {
-    const r = await api.selectCamera(wanted)
+    const r = await api.selectCamera(wanted, form.value.camera_role)
     const cam = r.camera || {}
     cameraNotice.value = `已切到 ${cam.serial || wanted}（${cam.name || ''} ${cam.width || ''}×${cam.height || ''}），右侧画面即该相机。`
   } catch (e) {
@@ -177,7 +177,7 @@ async function previewCamera() {
   } finally {
     busy.value = false
   }
-  // 无论成败都以 8131 实际连着的相机为准，避免表单和画面对不上
+  // 无论成败都以 18005 实际连着的相机为准，避免表单和画面对不上
   await loadCameras()
   if (cameraError.value && cameras.value.current_serial) form.value.camera_serial = cameras.value.current_serial
 }

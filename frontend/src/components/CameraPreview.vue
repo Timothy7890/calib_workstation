@@ -1,5 +1,5 @@
 <script setup>
-// 8131 /ws/stream 实时图像（左目，带角点叠加）。
+// 18005 /ws/stream 实时图像（左目，带角点叠加）。
 import { onMounted, onUnmounted, ref, watch } from 'vue'
 
 const props = defineProps({

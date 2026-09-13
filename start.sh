@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# 标定工作站一键启动：18000 能力中心 → 停推流独占相机 → 8131（2D 采集/求解，只读关节）
-#                     → 可选 8132 + 7013（3D 手/TCP）→ 18004（轨迹回放）→ 18005（统一页面）。
+# 标定工作站一键启动：18000 能力中心 → 停推流独占相机
+#                     → 可选旧 3D 服务 → 18004（轨迹回放）→ 18005（统一页面与原生 2D）。
 #
 #   ./start.sh                  # 真机
-#   ./start.sh --arm left       # 8131 初始读左臂（向导里可按计划切换）
-#   ./start.sh --mock           # 无硬件联调：8131 mock 相机/关节，18004 --mock，不碰 18000 与推流
+#   ./start.sh --arm left       # 向导初始选择左臂（向导里可按计划切换）
+#   ./start.sh --mock           # 无硬件联调：18005 mock 相机，18004 --mock，不碰 18000 与推流
 #   ./start.sh --dev            # 前端用 Vite 开发服务器（5175）代替构建产物
 #   ./start.sh --3d[=SERIAL]    # 同时拉起 8132（hand_eye_3D，只读关节、不控臂），供 18004 录 3D 点/跑 3D 计划。
 #                               # 3D 用 Orbbec SDK 直连并在启动时就占住一台相机：不给 SERIAL 取第一台；
-#                               # 同一台相机不能同时被 8131 与 8132 打开，2D 请在 8131 里选另一台。
+#                               # 迁移期 8132 仍会独占一台相机；原生 2D 应选择另一序列号。
 #
 # 环境变量：PYTHON、NETWORK_INTERFACE（默认 enp86s0）、WORKSTATION_CONFIG、CAPABILITY_SH
 set -u
@@ -18,7 +18,6 @@ export no_proxy="127.0.0.1,localhost" NO_PROXY="127.0.0.1,localhost"
 cd "$(dirname "$0")"
 ROOT="$PWD"
 CALIB_ROOT="$(cd .. && pwd)"
-HE2D_DIR="$CALIB_ROOT/hand_eye_2D"
 HE3D_DIR="$CALIB_ROOT/hand_eye_3D"
 REPLAY_DIR="$CALIB_ROOT/calibration_replay"
 CONFIG="${WORKSTATION_CONFIG:-$ROOT/config/workstation.yaml}"
@@ -63,16 +62,16 @@ c = yaml.safe_load(open(sys.argv[1])) or {}
 s = c.get("services") or {}
 def port(u, d): return urllib.parse.urlparse(u).port or d
 print(c.get("data_root", "./calib_workstation_data"), 18005,
-      s.get("hand_eye_2d", "http://127.0.0.1:8131"), s.get("replay", "http://127.0.0.1:18004"),
+      s.get("hand_eye_2d", "http://127.0.0.1:18005"), s.get("replay", "http://127.0.0.1:18004"),
       s.get("hand_eye_3d", "http://127.0.0.1:8132"), s.get("hand_eye_3d_ui", "http://127.0.0.1:7013"))
 EOF
 ) || { echo "[start] 读取配置失败: $CONFIG" >&2; exit 1; }
-PORT_2D="${URL_2D##*:}"; PORT_REPLAY="${URL_REPLAY##*:}"; PORT_3D="${URL_3D##*:}"; PORT_3D_UI="${URL_3D_UI##*:}"
+PORT_REPLAY="${URL_REPLAY##*:}"; PORT_3D="${URL_3D##*:}"; PORT_3D_UI="${URL_3D_UI##*:}"
 echo "[start] 配置 $CONFIG  数据目录 $DATA_ROOT（机器人编号在页面里输入）"
 
 # ---- 端口检查 ----
 port_free() { ! ss -ltn 2>/dev/null | awk -v p="$1" '$4 ~ (":" p "$") {f=1} END {exit !f}'; }
-for p in "$PORT_2D" "$PORT_WS"; do
+for p in "$PORT_WS"; do
   port_free "$p" || { echo "[start] 端口 $p 已被占用，请先结束旧进程" >&2; exit 1; }
 done
 if [ "$WITH_3D" -eq 1 ] && ! port_free "$PORT_3D"; then
@@ -104,7 +103,7 @@ if [ "$MOCK" -eq 0 ]; then
 fi
 
 # ---- 收尾 ----
-PID_2D=""; PID_3D=""; PID_3D_FE=""; PID_WS=""; PID_FE=""; CAMERA_LOCKED=0
+PID_3D=""; PID_3D_FE=""; PID_WS=""; PID_FE=""; CAMERA_LOCKED=0
 cleanup() {
   trap - INT TERM EXIT
   echo ""; echo "[start] 正在退出…"
@@ -117,12 +116,6 @@ cleanup() {
     kill -0 "$PID_3D" 2>/dev/null && { kill -TERM "$PID_3D" 2>/dev/null; sleep 1; kill -KILL "$PID_3D" 2>/dev/null; }
     wait "$PID_3D" 2>/dev/null
   fi
-  if [ -n "$PID_2D" ] && kill -INT "$PID_2D" 2>/dev/null; then
-    # uvicorn 会等浏览器的 /ws/stream 连接关闭；最多等 5 秒，然后强制结束以便尽快恢复推流
-    for _ in $(seq 1 10); do kill -0 "$PID_2D" 2>/dev/null || break; sleep 0.5; done
-    kill -0 "$PID_2D" 2>/dev/null && { kill -TERM "$PID_2D" 2>/dev/null; sleep 1; kill -KILL "$PID_2D" 2>/dev/null; }
-    wait "$PID_2D" 2>/dev/null
-  fi
   [ "$CAMERA_LOCKED" -eq 1 ] && "$ROOT/scripts/camera_lock.sh" release
   exit 0
 }
@@ -133,26 +126,6 @@ if [ "$MOCK" -eq 0 ]; then
   "$ROOT/scripts/camera_lock.sh" acquire || exit 1
   CAMERA_LOCKED=1
 fi
-
-# ---- 8131 ----
-# 8131 自己的兜底会话目录；正式采集都由 18004 指定 record_dir 落到回放运行目录
-SESSIONS_DIR="$DATA_ROOT/_hand_eye_2d_sessions"
-mkdir -p "$SESSIONS_DIR"
-ARGS_2D=(--robot h2 --arm "$ARM" --port "$PORT_2D" --save-path "$SESSIONS_DIR" --capability-url "$CAPABILITY_URL")
-if [ "$MOCK" -eq 1 ]; then
-  ARGS_2D+=(--camera-source mock --joint-source mock --skip-capability)
-else
-  ARGS_2D+=(--camera-source orbbec --joint-source h2 --network-interface "$IFACE")
-fi
-echo "[start] 正在启动 8131（首次加载 OpenCV/相机 SDK 可能需要几十秒）…"
-(cd "$HE2D_DIR" && exec "$PY" run_server.py "${ARGS_2D[@]}") >>"$LOG_DIR/hand_eye_2d.log" 2>&1 &
-PID_2D=$!
-for _ in $(seq 1 120); do
-  curl -sf --max-time 1 "$URL_2D/api/status" >/dev/null 2>&1 && break
-  kill -0 "$PID_2D" 2>/dev/null || { echo "[start] 8131 启动失败，见 $LOG_DIR/hand_eye_2d.log" >&2; tail -n 20 "$LOG_DIR/hand_eye_2d.log" >&2; exit 1; }
-  sleep 0.5
-done
-echo "[start] 8131 就绪（2D 采集/求解，--no arm-control 只读关节）"
 
 # ---- 8132（可选，3D）----
 if [ "$WITH_3D" -eq 1 ]; then
@@ -205,8 +178,12 @@ fi
 # ---- 18004 ----
 if [ "${REPLAY_OWNED:-0}" -eq 1 ]; then
   echo "[start] 正在启动 18004 轨迹回放…"
-  # mock 下采集仍走 HTTP 到 mock 8131，跑通全链路（会话 → 采集 → 求解 → 归档）
-  if [ "$MOCK" -eq 1 ]; then "$REPLAY_DIR/replay.sh" start --mock --capture-http; else "$REPLAY_DIR/replay.sh" start; fi || exit 1
+  # mock 下采集仍走 HTTP 到 18005 原生 mock 引擎，跑通全链路。
+  if [ "$MOCK" -eq 1 ]; then
+    BASE_URL_2D="$URL_2D" CALIB_WORKSTATION_URL="$URL_2D" "$REPLAY_DIR/replay.sh" start --mock --capture-http
+  else
+    BASE_URL_2D="$URL_2D" CALIB_WORKSTATION_URL="$URL_2D" "$REPLAY_DIR/replay.sh" start
+  fi || exit 1
 fi
 
 # ---- 前端 ----

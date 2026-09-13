@@ -1,7 +1,7 @@
 """统一标定产物包：<calibrations_root>/<type>/<subject_key>/<run_id>/manifest.json + 文件。
 
 与云端平台（Camera-Tools-for-Robot）的五个栏目一一对应：
-  extrinsic        外参：T_cam2base（camera → torso_link），来自 8131 handeye_result_left.json
+  extrinsic        外参：T_cam2base（camera → torso_link），来自原生 2D handeye_result_left.json
   intrinsic        内参：Orbbec SDK 读出的 camera_intrinsics.json
   camera_transform 内部相机转换（RGB-D depth→color），2D 流程不产出
   hand_mount      手安装：T_wrist2hand，来自 8132 mount_result.json

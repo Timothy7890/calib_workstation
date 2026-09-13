@@ -1,20 +1,17 @@
-"""18005 标定工作站后端：把 8131 + 18004 的多步操作编排成向导的一步。
-
-不直接碰相机与手臂：相机/采集/求解在 8131，运动/安全在 18004。本服务只做
-编排、校验（计划目标与相机位置一致、臂一致）、产物打包与登记。
-"""
+"""18005 标定工作站后端：统一相机、标定、运动编排、产物归档与云端同步。"""
 
 from __future__ import annotations
 
 import json
 import logging
+import asyncio
 import re
 import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -24,9 +21,11 @@ from .clients import HttpClient, ServiceError
 from .cloud import CloudError, CloudSettings, CloudSync
 from .config import CAMERA_ROLES, UNIT_CODE_RE, Config, validate_unit_code
 from .manifest import ARTIFACT_TYPES, ArtifactStore
+from .calib2d import Calib2DEngine
+from .camera import CameraManager, MockSource, OrbbecSource, discover_orbbec
 
 ARMS = ("left", "right")
-# 运行名：允许中文等 Unicode 字母/数字、. _ -；不能有空格、斜杠，不能以 . 开头（与 18004/8131 一致）
+# 运行名：允许中文等 Unicode 字母/数字、. _ -；不能有空格、斜杠，不能以 . 开头（与 18004 一致）
 _RUN_NAME_RE = re.compile(r"^[^\W.][\w.-]{0,63}$")
 # 相机位置或手部 subject_key（目录名）：小写字母/数字/下划线/连字符
 _ROLE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,127}$")
@@ -196,12 +195,32 @@ def create_app(config: Config) -> FastAPI:
     app = FastAPI(title="标定工作站", version=__version__)
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-    he2d = HttpClient("hand_eye_2D(8131)", config.hand_eye_2d_url)
     he3d = HttpClient("hand_eye_3D(8132)", config.hand_eye_3d_url, timeout_s=120.0)
     replay = HttpClient("回放(18004)", config.replay_url)
     capability = HttpClient("能力中心(18000)", config.capability_url)
     ws = Workspace(config)
     cloud = CloudSync(CloudSettings(config.data_root / "cloud.json"))
+    if config.mock:
+        mock_devices = [
+            {"serial": "MOCK-HEAD-0001", "name": "Mock Orbbec (head)"},
+            {"serial": "MOCK-WAIST-0002", "name": "Mock Orbbec (waist)"},
+        ]
+        camera_manager = CameraManager(
+            lambda serial: MockSource(serial), lambda: mock_devices)
+    else:
+        camera_manager = CameraManager(
+            lambda serial: OrbbecSource(
+                serial, calibration_path=config.rgbd_calibration_path),
+            discover_orbbec,
+        )
+    calib2d = Calib2DEngine(
+        camera_manager, config.data_root / "_hand_eye_2d_sessions",
+        tuple(int(value) for value in config.board_size.lower().split("x")),
+        config.robot_urdf_path,
+    )
+    app.state.camera_manager = camera_manager
+    app.state.calib2d = calib2d
+    app.router.add_event_handler("shutdown", camera_manager.close)
 
     def auto_push() -> None:
         """归档 / 切换生效后，若开启自动推送则后台把待同步产物推到云端。"""
@@ -234,7 +253,7 @@ def create_app(config: Config) -> FastAPI:
             # surfaces the error, so startup remains available for 2D work.
             logger.warning("未能向 18000 登记已保存的机器人 %s: %s", ws.unit_code, exc)
 
-    app.add_event_handler("startup", register_saved_robot)
+    app.router.add_event_handler("startup", register_saved_robot)
 
     def store() -> ArtifactStore:
         if ws.store is None:
@@ -316,7 +335,7 @@ def create_app(config: Config) -> FastAPI:
     @app.get("/api/health")
     def api_health():
         out: dict[str, Any] = {"ok": True, "services": {}}
-        ok2d, err2d = he2d.reachable("/api/status")
+        ok2d, err2d = True, None
         ok3d, err3d = he3d.reachable("/api/status")
         okr, errr = replay.reachable("/api/status")
         okc, errc = capability.reachable("/api/capability/registry")
@@ -325,8 +344,8 @@ def create_app(config: Config) -> FastAPI:
         out["services"]["replay"] = {"ok": okr, "error": errr}
         out["services"]["capability"] = {"ok": okc, "error": errc}
         if ok2d:
-            status = he2d.get("/api/status")
-            arm = he2d.get("/api/arm/status")
+            status = calib2d.status()
+            arm = {"available": False, "engaged": False}
             out["hand_eye_2d"] = {
                 "run_id": status.get("run_id"), "count": status.get("count"),
                 "arm": status.get("arm"), "arm_selectable": status.get("arm_selectable"),
@@ -335,7 +354,7 @@ def create_app(config: Config) -> FastAPI:
             }
             if out["hand_eye_2d"]["arm_control"]:
                 out["ok"] = False
-                out["services"]["hand_eye_2d"]["error"] = "8131 启用了手臂控制（--arm-control），会和回放抢控制权"
+                out["services"]["hand_eye_2d"]["error"] = "2D 引擎不应控制手臂；手臂控制只由 18004 持有"
         if okr:
             rs = replay.get("/api/status")
             out["replay"] = {"state": rs.get("state"), "message": rs.get("message"),
@@ -344,6 +363,94 @@ def create_app(config: Config) -> FastAPI:
                              "engaged": (rs.get("arm") or {}).get("engaged")}
         out["ok"] = out["ok"] and ok2d and okr
         return out
+
+    # ---- 原生2D兼容接口；18004切换后直接以18005作为采集目标 ----
+
+    def native_camera_role(serial: str, requested: str | None = None) -> str:
+        role = str(requested or ws.role_for_serial(serial) or "").strip()
+        if role not in config.cameras:
+            raise fail(409, f"相机 {serial} 尚未绑定位置，请先在18005选择头部或腰部")
+        return role
+
+    @app.get("/api/status")
+    def api_native_2d_status():
+        return calib2d.status()
+
+    @app.get("/api/session")
+    def api_native_2d_session():
+        return calib2d.status()
+
+    @app.post("/api/session/start")
+    def api_native_2d_session_start(body: dict):
+        try:
+            return calib2d.start_session(body)
+        except FileExistsError as exc:
+            raise fail(409, str(exc)) from exc
+        except (ValueError, RuntimeError) as exc:
+            raise fail(422, str(exc)) from exc
+
+    @app.get("/api/camera/devices")
+    def api_native_camera_devices():
+        devices = camera_manager.devices()
+        return {"success": True, "devices": devices,
+                "current_serial": calib2d.serial,
+                "connected": bool(calib2d.serial), "camera": calib2d.camera_info()}
+
+    @app.post("/api/camera/select")
+    def api_native_camera_select(body: dict):
+        serial = str(body.get("serial") or "").strip()
+        try:
+            role = native_camera_role(serial, body.get("camera_role"))
+            return {"success": True, "camera": calib2d.select(role, serial)}
+        except (KeyError, ValueError, RuntimeError) as exc:
+            raise fail(409, str(exc)) from exc
+
+    @app.post("/api/checkerboard/detect")
+    def api_native_checkerboard_detect(_body: dict | None = None):
+        try:
+            return calib2d.detect()
+        except (TimeoutError, RuntimeError) as exc:
+            raise fail(503, str(exc)) from exc
+
+    @app.post("/api/capture")
+    def api_native_capture(body: dict | None = None):
+        try:
+            return calib2d.capture(body or {})
+        except ValueError as exc:
+            raise fail(409, str(exc)) from exc
+        except (OSError, RuntimeError, TimeoutError) as exc:
+            raise fail(503, str(exc)) from exc
+
+    @app.post("/api/solve")
+    def api_native_solve(body: dict):
+        try:
+            return calib2d.solve(body)
+        except (ValueError, RuntimeError, OSError) as exc:
+            raise fail(409, str(exc)) from exc
+
+    @app.get("/api/solve/status")
+    def api_native_solve_status():
+        return calib2d.solve_status()
+
+    @app.get("/api/arm/status")
+    def api_native_arm_status():
+        return {"available": False, "enabled": False, "engaged": False,
+                "note": "手臂控制只由18004持有"}
+
+    @app.websocket("/ws/stream")
+    async def ws_native_stream(socket: WebSocket):
+        await socket.accept()
+        try:
+            while True:
+                try:
+                    jpeg = await asyncio.to_thread(calib2d.jpeg)
+                    await socket.send_bytes(jpeg)
+                except (TimeoutError, RuntimeError):
+                    await asyncio.sleep(0.2)
+                    continue
+                await asyncio.sleep(1 / 15)
+        except WebSocketDisconnect:
+            return
 
     # ---------------- 3D 手安装 / TCP ----------------
 
@@ -490,7 +597,7 @@ def create_app(config: Config) -> FastAPI:
 
     @app.get("/api/cameras")
     def api_cameras():
-        devices = he2d.get("/api/camera/devices")
+        devices = api_native_camera_devices()
         for d in devices.get("devices", []):
             d["role_hint"] = ws.role_for_serial(str(d.get("serial") or ""))
         devices["roles"] = {
@@ -504,11 +611,12 @@ def create_app(config: Config) -> FastAPI:
         serial = str(body.get("serial") or "").strip()
         if not serial:
             raise fail(422, "缺少相机序列号")
-        return he2d.post("/api/camera/select", {"serial": serial})
+        role = native_camera_role(serial, body.get("camera_role"))
+        return api_native_camera_select({"serial": serial, "camera_role": role})
 
     @app.post("/api/cameras/detect")
     def api_cameras_detect():
-        return he2d.post("/api/checkerboard/detect", {"board_size": config.board_size})
+        return api_native_checkerboard_detect()
 
     # ---------------- 计划 ----------------
 
@@ -539,7 +647,7 @@ def create_app(config: Config) -> FastAPI:
 
     @app.get("/api/calibration")
     def api_calibration():
-        """向导的聚合状态：当前任务 + 18004 状态 + 8131 会话。"""
+        """向导的聚合状态：当前任务 + 18004 状态 + 原生 2D 会话。"""
         data = job().snapshot()
         out: dict[str, Any] = {"job": data, "replay": None, "session": None}
         try:
@@ -547,7 +655,7 @@ def create_app(config: Config) -> FastAPI:
         except ServiceError as exc:
             out["replay_error"] = str(exc)
         try:
-            out["session"] = he2d.get("/api/session")
+            out["session"] = calib2d.status()
         except ServiceError as exc:
             out["session_error"] = str(exc)
         return out
@@ -576,6 +684,9 @@ def create_app(config: Config) -> FastAPI:
             raise fail(409, f"计划 {plan.get('name')} 是 {plan.get('arm')} 臂，与所选 {arm} 臂不符")
         if plan.get("draft"):
             raise fail(409, f"计划 {plan.get('name')} 还是草稿（缺少原点或校验未通过），请先在计划编辑里完成")
+        if plan.get("base_url") != config.hand_eye_2d_url:
+            plan["base_url"] = config.hand_eye_2d_url
+            plan = replay.put(f"/api/plans/{plan_id}", plan)
 
         # 计划里的相机序列号以本次选择为准（回放预检会 select+校验）；
         # 未检出棋盘格时：图像总是保存；continue=继续采后面的点，abort=停止采样沿剩余路径回原点
@@ -587,7 +698,7 @@ def create_app(config: Config) -> FastAPI:
             plan["on_missing_corners"] = on_missing
             plan = replay.put(f"/api/plans/{plan_id}", plan)
         # 先切到该相机让预览就是它；首个样本前可随时再切
-        camera = he2d.post("/api/camera/select", {"serial": serial})
+        camera = api_native_camera_select({"serial": serial, "camera_role": role.id})
         # 记住：这台机器人的该位置用这台相机，下次自动选中（重选即覆盖）
         ws.remember_camera(role.id, serial, str((camera.get("camera") or {}).get("name") or ""))
 
@@ -698,13 +809,13 @@ def create_app(config: Config) -> FastAPI:
             "method": str(body.get("method") or "park"),
             "eye": "left",
         }
-        result = he2d.post("/api/solve", payload)
+        result = api_native_solve(payload)
         job().update(step="solving", square_size_mm=square, solve_started_at=datetime.now().isoformat(timespec="seconds"))
         return {"ok": True, **result}
 
     @app.get("/api/calibration/solve/status")
     def api_solve_status():
-        status = he2d.get("/api/solve/status")
+        status = api_native_solve_status()
         data = job().snapshot()
         if data.get("step") == "solving" and not status.get("running"):
             if status.get("result") and not status.get("error"):

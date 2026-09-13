@@ -39,7 +39,7 @@ export const api = {
   forgetCamera: (role) => request('DELETE', `/api/robot/cameras/${role}`),
 
   cameras: () => request('GET', '/api/cameras'),
-  selectCamera: (serial) => request('POST', '/api/cameras/select', { serial }),
+  selectCamera: (serial, cameraRole) => request('POST', '/api/cameras/select', { serial, camera_role: cameraRole }),
   detect: () => request('POST', '/api/cameras/detect'),
 
   plans: (cameraRole, arm) =>

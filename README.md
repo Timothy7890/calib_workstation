@@ -6,7 +6,7 @@
 
 ```
 浏览器 ──► 18005 calib_workstation（本项目：向导页面 + 编排接口 + 产物归档）
-              ├─► 8131  hand_eye_2D      相机枚举/选择、图像流、采集、求解（只读关节，不控制手臂）
+              ├─► 原生 2D 引擎          相机枚举/选择、图像流、采集、求解（18005进程内）
               ├─► 8132 + 7013 hand_eye_3D  点云标注、手安装解算（可选，由 --3d 启动并嵌入）
               ├─► 18004 calibration_replay 轨迹回放：接管/协力拖动/归位/自动摆位（唯一 rt/arm_sdk 发布者）
               └─► 18000 能力中心          启动前拜访
@@ -17,14 +17,14 @@
 ```bash
 cd /home/robot/yx/project/calib/calib_workstation
 ./start.sh                 # 真机；Ctrl+C 全部退出并恢复推流
-./start.sh --arm left      # 8131 初始读左臂（向导里会按计划自动切换）
-./start.sh --mock          # 无硬件联调：8131 mock 相机（带可检出的棋盘格）/mock 关节，18004 --mock 但采集仍走 HTTP
+./start.sh --arm left      # 初始选择左臂（向导里会按计划自动切换）
+./start.sh --mock          # 无硬件联调：18005 mock 相机（带可检出的棋盘格），18004 --mock 但采集仍走 HTTP
 ./start.sh --dev           # 前端 Vite 开发服务器 5175
 ./start.sh --3d            # 同时启动 8132 与 7013，在“3D 手/TCP”页完成标注、解算和发布
 ```
 
 脚本顺序：找 Python → 读 `config/workstation.yaml` → 检查端口 → 18000 可达（否则拉起 `IK_replay/capability.sh`）
-→ `scripts/camera_lock.sh acquire` 释放相机 → 8131 → 18004（`replay.sh start`）→ 前端构建（缺失时）→ 18005。
+→ `scripts/camera_lock.sh acquire` 释放相机 → 18004（`replay.sh start`）→ 前端构建（缺失时）→ 18005（含原生2D引擎）。
 退出时逆序停止，并只在“推流原本在跑”时才 `systemctl start` 恢复。
 
 工作站的目标相机架构是单一所有者：一个物理序列号只允许一个 SDK Pipeline，
@@ -53,8 +53,8 @@ sudo visudo -c
 | 键 | 说明 |
 |---|---|
 | 机器人编号 | **不在配置文件里**。首次打开页面时输入（右上角可切换），保存在 `<data_root>/workstation_state.json`；是产物目录第一层 |
-| `services.*` | 8131 / 8132 / 7013 / 18004 / 18000 地址 |
-| `data_root` | 产物根目录 → `<data_root>/<unit_code>/calibrations/…`；8131 的兜底会话目录在 `<data_root>/_hand_eye_2d_sessions/`（正式采集落回放运行目录） |
+| `services.*` | 18005 原生 2D / 8132 / 7013 / 18004 / 18000 地址 |
+| `data_root` | 产物根目录 → `<data_root>/<unit_code>/calibrations/…`；2D 兜底会话目录在 `<data_root>/_hand_eye_2d_sessions/`（正式采集落回放运行目录） |
 | `cameras.head|waist` | 标签、回放计划目标（`hand_eye_2D_head|waist`）、可选序列号（留空则向导里从枚举结果选） |
 | `board` | 棋盘格内角点 `11x8`、默认方格边长 |
 
@@ -64,10 +64,10 @@ sudo visudo -c
 
 ## 向导流程（页面「开始标定」）
 
-1. 相机与计划：相机位置 → 持板手臂 → 相机序列号（8131 实时枚举，右侧预览即所选相机）→ 采集计划（自动按目标/手臂过滤，草稿不可选）。
+1. 相机与计划：相机位置 → 持板手臂 → 相机序列号（18005 实时枚举，右侧预览即所选相机）→ 采集计划（自动按目标/手臂过滤，草稿不可选）。
 2. 接管与归位：接管 → 协力拖动到原点 → 接住保持。
-3. 自动采集：回放按计划摆位，静止后 8131 采集（`require_corners` 未检出则拒绝）；可暂停/立即停止。数据直接落 `calibration_replay_data/runs/<arm>/<run_id>/`（`left/ joints/ session_meta.json camera_intrinsics.json run.json`）。
-4. 求解：方格边长 → 8131 `solve_handeye.py`。
+3. 自动采集：回放按计划摆位，静止后由 18005 原生引擎采集（`require_corners` 未检出则拒绝）；可暂停/立即停止。数据直接落 `calibration_replay_data/runs/<arm>/<run_id>/`（`left/ joints/ session_meta.json camera_intrinsics.json run.json`）。
+4. 求解：方格边长 → 18005 原生 `solve_handeye.py`。
 5. 结果与生效：内点/残差 → 「确认生效并归档」。
 
 任务状态落在 `<unit_root>/state/current_job.json`，刷新页面/重启 18005 会回到原步骤。
