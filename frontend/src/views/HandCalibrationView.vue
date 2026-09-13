@@ -552,10 +552,10 @@ onUnmounted(() => clearInterval(timer))
 .annotation-fullscreen .page-heading, .annotation-fullscreen :deep(.steps), .annotation-fullscreen .side-column, .annotation-fullscreen .object-options, .annotation-fullscreen .current-tool, .annotation-fullscreen .annotation-head { display: none; }
 .annotation-fullscreen .arm-recovery { position: static; flex: none; margin-bottom: 8px; }
 .annotation-fullscreen .page-message { flex: none; max-height: 90px; overflow: auto; margin-bottom: 8px; }
-.annotation-fullscreen .wizard-grid { display: flex; flex: 1; min-height: 0; }
-.annotation-fullscreen .wizard-grid > main { flex: 1; min-height: 0; }
-.annotation-fullscreen .annotation-card { height: 100%; display: flex; flex-direction: column; }
-.annotation-fullscreen .annotation-card iframe { flex: 1; height: 0; min-height: 0; }
+.annotation-fullscreen .wizard-grid { display: flex; flex: 1 1 0; min-height: 0; align-items: stretch; }
+.annotation-fullscreen .wizard-grid > main { display: flex; flex-direction: column; flex: 1 1 0; min-height: 0; }
+.annotation-fullscreen .annotation-card { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; }
+.annotation-fullscreen .annotation-card iframe { flex: 1 1 0; height: auto; min-height: 0; }
 .annotation-fullscreen :deep(.tool-picker) { flex: 1; min-height: 0; overflow: auto; }
 .annotation-fullscreen .annotation-actions { flex: none; margin: 0; padding: 8px 14px; }
 .hand-inner { max-width: 1280px; width: 100%; padding-top: 32px; }
