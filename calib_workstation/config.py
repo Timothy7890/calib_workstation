@@ -42,6 +42,7 @@ class Config:
     mock: bool = False
     path: Path | None = None
     hand_service_url: str = "http://127.0.0.1:18089"
+    hand_connections: dict[str, Any] = field(default_factory=dict)
 
     @property
     def state_path(self) -> Path:
@@ -101,6 +102,9 @@ def load_config(path: str | Path | None = None, *, mock: bool = False) -> Config
 
     board = raw.get("board") or {}
     camera = raw.get("camera") or {}
+    hand_connections = raw.get("hand_connections") or {}
+    if not isinstance(hand_connections, dict):
+        raise ValueError("hand_connections 必须是设备配置映射")
     return Config(
         vendor=str(robot.get("vendor") or "unitree"),
         model=str(robot.get("model") or "h2"),
@@ -108,6 +112,7 @@ def load_config(path: str | Path | None = None, *, mock: bool = False) -> Config
         replay_url=str(services.get("replay") or "http://127.0.0.1:18004").rstrip("/"),
         capability_url=str(services.get("capability") or "http://127.0.0.1:18000").rstrip("/"),
         hand_service_url=str(services.get("hand_web") or "http://127.0.0.1:18089").strip().rstrip("/"),
+        hand_connections=hand_connections,
         rgbd_calibration_path=Path(
             camera.get("rgbd_calibration")
             or "/home/robot/yx/project/IK_replay/config/camera/orbbec_rgbd_calibration.json"

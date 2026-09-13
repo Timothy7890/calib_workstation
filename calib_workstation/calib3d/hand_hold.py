@@ -15,6 +15,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any, Callable
 
 HOLD_INTERVAL_S = 0.3
@@ -68,13 +69,13 @@ def _request_json(
 class HandHoldController:
     """单实例保持线程：start 幂等（同设备同侧），stop 后线程退出。
 
-    连接参数（通信方式、端口等）沿用 18089 config.json 里各设备的默认值，
-    这里只传 device_id。命令循环里的失败不中断保持（可能是瞬时占用），
-    最近一次错误通过 status() 暴露给页面。
+    强脑默认使用Modbus，左126/右127；本工作站配置可覆盖连接参数。
+    不抢占或断开其他连接，确认设备、侧别、地址及在线反馈后才发送零位。
     """
 
-    def __init__(self, url_getter: Callable[[], str]) -> None:
+    def __init__(self, url_getter: Callable[[], str], connections_getter: Callable[[], dict] = lambda: {}) -> None:
         self._url_getter = url_getter
+        self._connections_getter = connections_getter
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -82,6 +83,49 @@ class HandHoldController:
 
     def _url(self, path: str) -> str:
         return str(self._url_getter()).rstrip("/") + path
+
+    def _connection_request(self, device_id: str, side: str) -> dict:
+        config = self._connections_getter().get(device_id, {})
+        if not isinstance(config, dict) or not isinstance(config.get(side, {}), dict):
+            raise ValueError(f"hand_connections.{device_id} 及侧别配置必须是映射")
+        transport = config.get("transport") or ("modbus" if device_id == "brainco_revo2" else None)
+        if transport is None:
+            defaults = _request_json(self._url("/api/devices")).get("defaults", {})
+            transport = defaults.get(device_id, {}).get("default_transport")
+        if transport not in ("modbus", "dds"):
+            raise ValueError(f"未支持的灵巧手通信方式: {transport}")
+        options = dict(config.get(side, {}))
+        if transport == "modbus":
+            options["side"] = side
+            if device_id == "brainco_revo2":
+                options.setdefault("slave_id", 126 if side == "left" else 127)
+                address = options["slave_id"]
+                if isinstance(address, bool) or not isinstance(address, int) or not 1 <= address <= 247:
+                    raise ValueError("强脑 slave_id 必须是1–247之间的整数")
+        else:
+            options["sides"] = side
+        return {"device_id": device_id, "transport": transport, "options": options}
+
+    def _validate_connection(self, status: dict, request: dict, side: str) -> None:
+        if status.get("control_owner") is not None:
+            raise HandHoldError("18089 正被其他控制源占用，请先停止该控制源")
+        options = request["options"]
+        hand = (status.get("hands") or {}).get(side) or {}
+        matching = (status.get("connected") and status.get("device_id") == request["device_id"]
+                    and status.get("transport") == request["transport"] and bool(hand))
+        if request["transport"] == "modbus":
+            matching = matching and ("slave_id" not in options or status.get("slave_id") == options["slave_id"])
+            # A configured path may be a stable /dev/serial/by-id alias.
+            if options.get("port"):
+                matching = matching and Path(str(status.get("port") or "")).resolve() == Path(options["port"]).resolve()
+        if not matching:
+            raise HandHoldError(
+                f"18089连接与目标 {request['device_id']}/{side} "
+                f"({request['transport']}, ID={options.get('slave_id', '—')}) 不一致；"
+                "请先在18089断开旧连接，再从18005重试，不会自动抢占或切换设备"
+            )
+        if not hand.get("online") or status.get("error"):
+            raise HandHoldError(f"18089目标手无有效在线反馈: {status.get('error') or side}")
 
     def start(self, device_id: str, side: str) -> dict[str, Any]:
         if not isinstance(device_id, str) or not device_id.strip():
@@ -100,14 +144,21 @@ class HandHoldController:
                     f"正在保持 {self._state.get('device_id')}/{self._state.get('side')}，"
                     "请先停止再切换设备或侧"
                 )
-            # 已连接同设备时 18089 会复用现有通道
-            _request_json(self._url("/api/connect"), {"device_id": device_id})
+            connection = self._connection_request(device_id, side)
+            current = _request_json(self._url("/api/status"))
+            if current.get("control_owner") is not None:
+                raise HandHoldError("18089 正被其他控制源占用，请先停止该控制源")
+            if not current.get("connected"):
+                _request_json(self._url("/api/connect"), connection)
+                current = _request_json(self._url("/api/status"))
+            self._validate_connection(current, connection, side)
             stop_event = threading.Event()
             self._stop_event = stop_event
             self._state = {
                 "running": True,
                 "device_id": device_id,
                 "side": side,
+                "connection": connection,
                 "started_at": time.time(),
                 "sent_count": 0,
                 "error_count": 0,
@@ -117,14 +168,14 @@ class HandHoldController:
             }
             self._thread = threading.Thread(
                 target=self._run,
-                args=(side, stop_event),
+                args=(side, stop_event, connection),
                 name="hand-hold-18089",
                 daemon=True,
             )
             self._thread.start()
             return self._snapshot_locked()
 
-    def _run(self, side: str, stop_event: threading.Event) -> None:
+    def _run(self, side: str, stop_event: threading.Event, connection: dict) -> None:
         payload = {
             "side": side,
             "positions": list(HOLD_POSITIONS),
@@ -133,6 +184,9 @@ class HandHoldController:
         }
         while not stop_event.is_set():
             try:
+                self._validate_connection(_request_json(self._url("/api/status")), connection, side)
+                if stop_event.is_set():
+                    return
                 _request_json(self._url("/api/command"), payload)
                 with self._lock:
                     if not stop_event.is_set():
@@ -144,6 +198,9 @@ class HandHoldController:
                     if not stop_event.is_set():
                         self._state["error_count"] += 1
                         self._state["last_error"] = str(exc)
+                        self._state["running"] = False
+                stop_event.set()
+                return
             stop_event.wait(HOLD_INTERVAL_S)
 
     def stop(self) -> dict[str, Any]:

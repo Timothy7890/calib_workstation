@@ -75,7 +75,8 @@ rgbd_calib_path: Path = DEFAULT_RGBD_CALIB_PATH
 mount_calib_path: Path | None = None
 mount_profile_dir: Path = PROJECT_ROOT / "handeye3d_data" / "mount_model_profiles"
 hand_service_url: str = "http://127.0.0.1:18089"
-hand_hold = HandHoldController(lambda: hand_service_url)
+hand_connections: dict = {}
+hand_hold = HandHoldController(lambda: hand_service_url, lambda: hand_connections)
 samples_lock = threading.Lock()
 record_lock = threading.Lock()
 # 18000 能力中心：地址与启动拜访快照由 run_server 注入（快照供后续按

@@ -243,6 +243,7 @@ def create_app(config: Config) -> FastAPI:
         rgbd_calibration_path=config.rgbd_calibration_path,
         capability_url=config.capability_url,
         hand_service_url=config.hand_service_url,
+        hand_connections=config.hand_connections,
         mock=config.mock,
     )
     app.state.calib3d_camera = calib3d_camera

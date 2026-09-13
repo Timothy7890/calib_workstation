@@ -15,7 +15,8 @@ from calib_workstation.calib3d import app as engine, hand_hold
     ("https://127.0.0.1:18089/", "https://127.0.0.1:18089"),
 ])
 def test_hand_service_url_reaches_controller_without_hardware(tmp_path, monkeypatch, configured, expected):
-    raw = {"cameras": {"head": {}}, "data_root": str(tmp_path / "data")}
+    raw = {"cameras": {"head": {}}, "data_root": str(tmp_path / "data"),
+           "hand_connections": {"brainco_revo2": {"left": {"slave_id": 42}}}}
     if configured is not None:
         raw["services"] = {"hand_web": configured}
     path = tmp_path / "workstation.yaml"
@@ -31,6 +32,7 @@ def test_hand_service_url_reaches_controller_without_hardware(tmp_path, monkeypa
     monkeypatch.setattr(hand_hold.urllib.request, "urlopen", fake_urlopen)
     with TestClient(create_app(config)):
         assert engine.hand_service_url == expected
+        assert engine.hand_hold._connection_request("brainco_revo2", "left")["options"]["slave_id"] == 42
         # Exercise URL construction and transport without connecting or commanding a hand.
         assert hand_hold._request_json(engine.hand_hold._url("/api/status"))["ok"]
     assert calls[0][:2] == (expected + "/api/status", "GET")

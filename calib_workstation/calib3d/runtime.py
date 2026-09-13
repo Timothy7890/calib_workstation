@@ -20,6 +20,7 @@ def configure(
     capability_url: str,
     mock: bool,
     hand_service_url: str = "http://127.0.0.1:18089",
+    hand_connections: dict | None = None,
 ) -> ManagedRGBDCamera:
     arm = os.environ.get("CALIB_DEFAULT_ARM", "right").strip()
     if arm not in ("left", "right"):
@@ -66,6 +67,7 @@ def configure(
     ).resolve()
     app_module.capability_url = capability_url.rstrip("/")
     app_module.hand_service_url = hand_service_url.rstrip("/")
+    app_module.hand_connections = hand_connections or {}
     app_module.capability_snapshot = None
     app_module.workstation_data_root = data_root.resolve()
     app_module.init_state()

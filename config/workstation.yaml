@@ -11,6 +11,14 @@ services:
   capability: http://127.0.0.1:18000      # 能力中心
   hand_web: http://127.0.0.1:18089        # 灵巧手控制；仅服务启用TLS时填写https
 
+# 18005调用18089时显式传入，不修改18089自身配置。
+# 自定义设备地址/串口在相应侧覆盖；port为空表示使用18089的默认/自动枚举。
+hand_connections:
+  brainco_revo2:
+    transport: modbus
+    left: {slave_id: 126, port: ""}
+    right: {slave_id: 127, port: ""}
+
 camera:
   # 同一份生产RGB-D Profile/内外参约束供统一CameraManager和3D深度对齐使用
   rgbd_calibration: /home/robot/yx/project/IK_replay/config/camera/orbbec_rgbd_calibration.json
