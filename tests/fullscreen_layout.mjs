@@ -9,8 +9,11 @@ const browser = await chromium.launch({ headless: true })
 try {
   for (const [width, height] of [[5114, 2360], [1920, 1080], [1280, 720], [800, 600]]) {
     const page = await browser.newPage({ viewport: { width, height } })
+    let restoreCalls = 0
+    let objectCalls = 0
+    const alreadyConfirmed = width !== 800
     const job = { calibration_kind: '3d', step: 'annotating', arm: 'left', camera_role: 'head',
-      run_dir: '/mock/capture', object_mode: 'hand', model_id: 'qiangnao-revo2-left' }
+      run_dir: '/mock/capture', object_mode: alreadyConfirmed ? 'hand' : null, model_id: 'qiangnao-revo2-left' }
     await page.route('**/*', async route => {
       const url = new URL(route.request().url())
       assert.equal(url.hostname, 'layout.test', 'No external services may be contacted')
@@ -21,8 +24,8 @@ try {
       if (path === '/api/hand-calibration') return reply({ job, ui_url: '/mock-viewer/', service: { ok: true },
         replay: { state: 'completed', arm: { arm: 'left', engaged: true } }, active: { arm: 'left_arm' },
         episodes: [], tasks: [], annotation: {} })
-      if (path === '/api/hand-calibration/object') return reply({ ok: true, job })
-      if (path === '/api/hand-calibration/annotation-session') return reply({ ok: true, job })
+      if (path === '/api/hand-calibration/object') { objectCalls += 1; job.object_mode = 'hand'; return reply({ ok: true, job }) }
+      if (path === '/api/hand-calibration/annotation-session') { restoreCalls += 1; return reply({ ok: true, job }) }
       if (path === '/three-d/api/hands') return reply({ hands: [{ hand_id: job.model_id, label: '强脑-Revo2-左', side: 'left' }] })
       if (path.startsWith('/api/calibration/')) throw new Error(`Unexpected control request: ${path}`)
       if (path.startsWith('/api/')) return reply({ plans: [], devices: [], roles: {} })
@@ -32,6 +35,12 @@ try {
       return route.fulfill({ contentType, body: await readFile(dist + file) })
     })
     await page.goto('http://layout.test/hand-calibration')
+    await page.getByRole('button', { name: '确认对象', exact: true }).waitFor()
+    assert.equal(await page.getByRole('button', { name: '全屏选点', exact: true }).count(), 0)
+    assert.equal(await page.locator('.annotation-card iframe').count(), 0, 'No inline viewer before confirmation')
+    assert.equal(await page.locator('.annotation-actions').count(), 0, 'No inline viewer footer')
+    assert.equal(restoreCalls, 0, 'Do not restore an annotation session before confirmation')
+    if (!alreadyConfirmed) await page.getByLabel('几何模型').selectOption(job.model_id)
     await page.getByRole('button', { name: '确认对象', exact: true }).click()
     await page.locator('.annotation-fullscreen').waitFor()
     const frame = await page.locator('.annotation-card iframe').boundingBox()
@@ -45,11 +54,19 @@ try {
     for (const name of ['立即停止', '卸力拖动', '保持', '结束接管', '退出全屏']) {
       assert.ok(await page.getByRole('button', { name, exact: true }).isVisible(), name)
     }
-    // Returning to the wizard and reopening must not depend on re-confirming/resetting annotations.
+    // The single confirmation entry reopens the existing viewer without losing unsaved state.
+    const viewer = await (await page.locator('.annotation-card iframe').elementHandle()).contentFrame()
+    await viewer.evaluate(() => { window.unsavedSelection = 'retained' })
     await page.getByRole('button', { name: '退出全屏', exact: true }).click()
     assert.equal(await page.locator('.annotation-fullscreen').count(), 0)
-    await page.getByRole('button', { name: '全屏选点', exact: true }).click()
+    assert.equal(await page.locator('.annotation-card iframe').isVisible(), false, 'No small viewer after exiting fullscreen')
+    assert.equal(await page.locator('.annotation-actions').count(), 0)
+    await page.getByRole('button', { name: '确认对象', exact: true }).click()
+    await page.locator('.annotation-fullscreen').waitFor()
     assert.ok((await page.locator('.annotation-card iframe').boundingBox()).height > height * 0.55)
+    assert.equal(await viewer.evaluate(() => window.unsavedSelection), 'retained')
+    assert.equal(restoreCalls, alreadyConfirmed ? 2 : 1)
+    assert.equal(objectCalls, alreadyConfirmed ? 0 : 1, 'Reconfirming the same object must not reset the calibration job')
     console.log(`${width}x${height}: iframe ${Math.round(frame.width)}x${Math.round(frame.height)}, footer visible`)
     if (process.env.LAYOUT_SCREENSHOT && width === 1920) await page.screenshot({ path: process.env.LAYOUT_SCREENSHOT })
     await page.close()

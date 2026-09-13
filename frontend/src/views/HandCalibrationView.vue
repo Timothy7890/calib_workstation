@@ -41,16 +41,21 @@ const objectForm = ref({ mode: 'hand', model_id: '', tool_id: '' })
 let objectContextKey = ''
 const generic = computed(() => ['tool', 'tcp'].includes(job.value.object_mode))
 async function selectObject() {
+  const sameObject = job.value.object_mode === objectForm.value.mode
+    && (objectForm.value.mode === 'hand'
+      ? job.value.model_id === objectForm.value.model_id
+      : job.value.tool_id === objectForm.value.tool_id)
+  if (sameObject) return openAnnotation()
   const response = await guard('object', () => api.selectCalibrationObject(objectForm.value))
   if (response) { job.value = response.job; annotationSessionReady.value = true; iframeKey.value += 1; annotationFullscreen.value = true; await refresh({ keepStep: true }) }
 }
-async function openAnnotation(fullscreenView = true) {
-  annotationSessionReady.value = false
+async function openAnnotation() {
   const response = await guard('restore-annotation', () => api.restoreAnnotationSession())
   if (!response) return
+  // Reopening the same object keeps the viewer and its unsaved selections alive.
+  if (!annotationSessionReady.value) iframeKey.value += 1
   annotationSessionReady.value = true
-  iframeKey.value += 1
-  annotationFullscreen.value = fullscreenView
+  annotationFullscreen.value = true
   await refresh({ keepStep: true })
 }
 async function pointsUpdated(value) { job.value = value; await refresh({ keepStep: true }) }
@@ -231,7 +236,8 @@ async function loadExisting() {
   iframeKey.value += 1
   step.value = 'annotate'
   notice.value = '数据检查通过，已直接进入手动选点。'
-  annotationSessionReady.value = true
+  annotationSessionReady.value = false
+  annotationFullscreen.value = false
 }
 
 const engage = () => guard('engage', async () => { await api.engage(); await refresh({ keepStep: true }) })
@@ -273,7 +279,8 @@ async function enterAnnotation() {
   job.value = response.job
   iframeKey.value += 1
   step.value = 'annotate'
-  annotationSessionReady.value = true
+  annotationSessionReady.value = false
+  annotationFullscreen.value = false
   await refresh({ keepStep: true })
 }
 
@@ -335,7 +342,6 @@ watch(() => form.value.camera_role, () => {
 let timer = null
 onMounted(async () => {
   await refresh()
-  if (step.value === 'annotate') await openAnnotation(false)
   await loadOptions()
   timer = setInterval(() => {
     refresh({ keepStep: true })
@@ -480,12 +486,10 @@ onUnmounted(() => clearInterval(timer))
               <label v-if="objectForm.mode === 'hand'" class="field">几何模型<select v-model="objectForm.model_id"><option value="">请选择与实体一致的模型</option><option v-for="model in models.filter(m => m.side === job.arm)" :key="model.hand_id" :value="model.hand_id">{{ model.label }}</option></select></label>
               <label v-else class="field">工具编号<input v-model.trim="objectForm.tool_id" placeholder="例如 probe-01" /></label>
               <button class="btn" :disabled="!!busy" @click="selectObject">确认对象</button>
-              <button v-if="job.object_mode" class="btn ghost" :disabled="!!busy" @click="openAnnotation()">全屏选点</button>
             </div>
-            <ToolPointPicker v-if="annotationSessionReady && generic" :job="job" :episodes="episodes" @updated="pointsUpdated" />
-            <iframe v-else-if="annotationSessionReady && job.model_id" :key="iframeKey" :src="`${state?.ui_url || '/three-d-ui/'}?embedded=annotation&model_id=${encodeURIComponent(job.model_id)}`" title="3D点云手动选点操作台"></iframe>
-            <p class="current-tool">当前工具类型：{{ currentToolLabel }}</p>
-            <div class="actions annotation-actions">
+            <ToolPointPicker v-if="annotationSessionReady && generic" v-show="fullscreen" :job="job" :episodes="episodes" @updated="pointsUpdated" />
+            <iframe v-else-if="annotationSessionReady && job.model_id" v-show="fullscreen" :key="iframeKey" :src="`${state?.ui_url || '/three-d-ui/'}?embedded=annotation&model_id=${encodeURIComponent(job.model_id)}`" title="3D点云手动选点操作台"></iframe>
+            <div v-if="fullscreen" class="actions annotation-actions">
               <button class="btn ghost" :disabled="!!busy" @click="iframeKey += 1; refresh({ keepStep: true })">刷新选点进度</button>
               <button class="btn lg" :disabled="!!busy || !annotationReady" @click="finishAnnotation">选点完成，进入求解</button>
             </div>
