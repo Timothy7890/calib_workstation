@@ -498,6 +498,7 @@ onUnmounted(() => clearInterval(timer))
           <article v-else-if="step === 'solve'" class="card">
             <h2 class="card-title">求解并检查标定结果</h2>
             <p>{{ generic ? '使用采集时的相机外参，将对应实体点转换到腕坐标系，计算TCP位置和跨姿态残差。' : '使用已选手模型，求解手安装位姿与TCP。' }}</p>
+            <p v-if="!generic" class="muted">沿用选点操作台上次解算保存的贴纸排除名单（当前排除 {{ result?.excluded_point_ids?.length || 0 }} 张）。如需调整参与贴纸，请先在操作台勾选并解算保存；仅改变勾选不会保存名单。</p>
             <table class="plain"><tbody>
               <tr><th>数据目录</th><td class="mono path-cell">{{ job.run_dir }}</td></tr>
               <tr><th>采集姿态</th><td>{{ job.sample_count ?? episodes.length }}</td></tr>

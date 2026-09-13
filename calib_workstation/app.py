@@ -753,8 +753,22 @@ def create_app(config: Config) -> FastAPI:
         if extrinsic.get("artifact_id") != current_job.get("extrinsic_artifact_id"):
             raise fail(409, "当前生效的2D外参已在任务准备后变化，请重新开始3D标定")
         calib_path = Path(extrinsic["path"]) / str(extrinsic.get("primary_file") or "handeye_result_left.json")
+        # The embedded solver persists the user's sticker selection in its result.
+        # Omitting this field here would silently re-include every excluded point.
+        saved = local_3d_payload(await calib3d_mount.api_mount_result()).get("result") or {}
+        excluded = saved.get("excluded_point_ids", [])
+        if not isinstance(excluded, list) or not all(isinstance(item, str) for item in excluded):
+            raise fail(409, "已保存的贴纸排除名单格式不合法，请在选点操作台重新确认并解算")
+        if excluded:
+            saved_arm = str(saved.get("arm") or "").replace("_arm", "")
+            saved_hand = canonical_hand_id(saved.get("hand_id"))
+            expected_hand = canonical_hand_id(current_job.get("model_id") or current_job.get("hand_id"))
+            if (saved_arm and saved_arm != current_job.get("arm")) or (saved_hand and saved_hand != expected_hand):
+                raise fail(409, "已保存的贴纸排除名单属于其他手/臂，请在当前对象的选点操作台重新确认并解算")
         result = local_3d_payload(
-            await calib3d_mount.api_mount_solve({"calib_path": str(calib_path)})
+            await calib3d_mount.api_mount_solve({
+                "calib_path": str(calib_path), "exclude_point_ids": excluded,
+            })
         )
         job().update(step="solved", solved=True)
         return result
