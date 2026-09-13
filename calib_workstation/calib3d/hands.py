@@ -26,6 +26,15 @@ from .robotics.robot_model import RobotModel
 from .robotics.types import Pose
 
 HANDS_CONFIG_PATH = PROJECT_ROOT / "config" / "hands.yaml"
+HAND_ID_ALIASES = {
+    "qiangnao-1-left": "qiangnao-revo2-left",
+    "qiangnao-1-right": "qiangnao-revo2-right",
+}
+
+
+def canonical_hand_id(hand_id: str | None) -> str | None:
+    """Legacy geometric IDs remain readable without rewriting captured data."""
+    return HAND_ID_ALIASES.get(hand_id, hand_id) if isinstance(hand_id, str) else hand_id
 
 # tip link 名称到中文标签的手指映射（因时 R_/L_ 前缀与强脑 right_/left_ 前缀通用）
 _FINGER_LABELS = {
@@ -325,6 +334,7 @@ def hand_catalog() -> dict[str, HandSpec]:
 
 
 def get_hand_model(hand_id: str) -> HandModel:
+    hand_id = canonical_hand_id(hand_id)
     catalog = hand_catalog()
     if hand_id not in catalog:
         raise KeyError(f"未登记的手型号 {hand_id!r}，可用: {sorted(catalog)}")

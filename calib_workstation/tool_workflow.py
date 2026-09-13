@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .calib3d import app as engine
 from .calib3d import mount_api
-from .calib3d.hands import get_hand_model
+from .calib3d.hands import get_hand_model, canonical_hand_id
 from .contract import canonical_subject, subject_key
 from .tool_calibration import solve_tool
 
@@ -29,7 +29,7 @@ def install_object_routes(app, *, job, require_job, registry, extrinsic, store, 
         mode = body.get("mode")
         if mode not in ("hand", "tool", "tcp"):
             raise fail(422, "请选择标定对象")
-        model_id = body.get("model_id") if mode == "hand" else None
+        model_id = canonical_hand_id(body.get("model_id")) if mode == "hand" else None
         if mode == "hand":
             if not isinstance(model_id, str) or not model_id:
                 raise fail(422, "请选择几何模型")

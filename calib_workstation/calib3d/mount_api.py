@@ -22,7 +22,7 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
 from .hand_hold import HOLD_SIDES, VENDOR_DEVICE_IDS, HandHoldError
-from .hands import HandCatalogError, get_hand_model, hand_catalog
+from .hands import HandCatalogError, get_hand_model, hand_catalog, canonical_hand_id
 from .offline import EpisodeValidationError, PointCloudStaleError
 from .paths import PROJECT_ROOT
 from .solver import (
@@ -193,7 +193,7 @@ def _read_mount_profile(path: Path) -> dict[str, Any]:
         "schema_version": 1,
         "profile_id": profile_id,
         "name": name,
-        "hand_id": hand_id,
+        "hand_id": canonical_hand_id(hand_id),
         "points": points,
         "point_count": len(points),
         "complete": len(points) == len(MOUNT_PROFILE_POINT_IDS),
@@ -218,7 +218,9 @@ def _load_mount_samples() -> list[dict]:
     items = []
     for f in sorted(_mount_dir().glob("*.json")):
         try:
-            items.append(json.loads(f.read_text()))
+            sample = json.loads(f.read_text())
+            sample["hand_id"] = canonical_hand_id(sample.get("hand_id"))
+            items.append(sample)
         except (OSError, json.JSONDecodeError):
             continue
     return items
@@ -503,7 +505,7 @@ async def _require_active_combo(
         )
     context = getattr(state, "annotation_context", lambda: {})()
     selected_model = context.get("model_id") if context.get("object_mode") == "hand" else None
-    if (selected_model or hint.get("hand_id")) != hand_id:
+    if canonical_hand_id(selected_model or hint.get("hand_id")) != canonical_hand_id(hand_id):
         return hint, None, JSONResponse(
             {
                 "ok": False,
@@ -623,7 +625,7 @@ async def api_mount_model_point_profiles(hand_id: str | None = None):
                 except (OSError, json.JSONDecodeError, ValueError) as exc:
                     invalid_profiles.append({"file": path.name, "error": str(exc)})
                     continue
-                if hand_id is None or profile.get("hand_id") == hand_id:
+                if hand_id is None or profile.get("hand_id") == canonical_hand_id(hand_id):
                     profiles.append(profile)
     except OSError as exc:
         return JSONResponse(
@@ -996,7 +998,7 @@ def _validated_mount_observation(observation: dict, position: int) -> dict:
         {
             "schema_version": 3,
             "point_id": point_id,
-            "hand_id": str(observation["hand_id"]).strip(),
+            "hand_id": canonical_hand_id(str(observation["hand_id"]).strip()),
             "pose_id": str(observation["pose_id"]).strip(),
             "p_hand": None if p_hand is None else p_hand.tolist(),
             "p_camera": p_camera.tolist(),
@@ -1198,6 +1200,7 @@ async def api_mount_result():
             {"ok": False, "error": "安装标定结果格式不合法"},
             status_code=500,
         )
+    result["hand_id"] = canonical_hand_id(result.get("hand_id"))
     result["saved_to"] = str(path)
     merged = state.save_path / "handeye3d_result_mount.json"
     if merged.is_file():

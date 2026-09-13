@@ -27,6 +27,7 @@ from .camera import (
 )
 from .calib3d import app as calib3d_app
 from .calib3d import mount_api as calib3d_mount
+from .calib3d.hands import canonical_hand_id
 from .calib3d.runtime import configure as configure_calib3d
 from .tool_workflow import install_object_routes
 
@@ -525,7 +526,7 @@ def create_app(config: Config) -> FastAPI:
         samples = [
             item for item in (payload.get("samples") or [])
             if str(item.get("pose_id") or "") in episode_names
-            and (not current.get("model_id") or item.get("hand_id") == current["model_id"])
+            and (not current.get("model_id") or item.get("hand_id") == canonical_hand_id(current["model_id"]))
         ]
         counts: dict[str, int] = {}
         for sample in samples:
@@ -789,7 +790,7 @@ def create_app(config: Config) -> FastAPI:
         if result_arm and f"{result_arm}_arm" != arm:
             raise fail(409, f"3D结果属于 {result.get('arm')}，18000 当前激活的是 {arm}")
         result_hand = str(result.get("hand_id") or "")
-        if result_hand and result_hand != (current_job.get("model_id") or hand_id):
+        if result_hand and canonical_hand_id(result_hand) != canonical_hand_id(current_job.get("model_id") or hand_id):
             raise fail(409, f"3D结果属于手 {result_hand}，18000 当前激活的是 {hand_id}")
         result_path = Path(str(result.get("saved_to") or ""))
         hand = next((item for item in registry.get("hands") or []

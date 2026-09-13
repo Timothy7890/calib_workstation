@@ -75,6 +75,12 @@ const boardSize = computed(() => config.value?.board?.size || '')
 const activeHand = computed(() =>
   (state.value?.hands || []).find((item) => item.id === active.value.hand_id),
 )
+const currentToolLabel = computed(() => {
+  if (job.value.object_mode === 'tcp') return `仅求TCP · ${job.value.tool_id}`
+  if (job.value.object_mode === 'tool') return `普通刚性工具 · ${job.value.tool_id}`
+  if (job.value.model_id) return models.value.find(m => m.hand_id === job.value.model_id)?.label || job.value.model_id
+  return activeHand.value?.name || active.value.hand_id || '未配置（可在选点时选择工具模式）'
+})
 const extrinsic = computed(() => state.value?.camera_artifacts?.extrinsic || null)
 const mount = computed(() => state.value?.mount || {})
 const result = computed(() => mount.value?.result || null)
@@ -364,7 +370,8 @@ onUnmounted(() => clearInterval(timer))
                 <span>{{ plans.length ? '当前手臂的3D计划尚未完成校验。' : '当前手臂还没有3D采集计划。' }}</span>
                 <RouterLink class="btn" :to="{ name: 'plans' }">前往采集计划</RouterLink>
               </div>
-              <div v-else class="setup-actions">
+              <p class="current-tool">当前工具类型：{{ activeHand?.name || active.hand_id || '未配置（不影响刚性工具采集）' }}</p>
+              <div v-if="hasReadyPlan" class="setup-actions">
                 <button class="btn lg" :disabled="!!busy || state?.service?.ok === false || !extrinsic || !form.camera_serial || !form.plan_id" @click="prepareCapture">下一步</button>
               </div>
             </template>
@@ -430,6 +437,7 @@ onUnmounted(() => clearInterval(timer))
             </div>
             <ToolPointPicker v-if="generic" :job="job" :episodes="episodes" @updated="pointsUpdated" />
             <iframe v-else-if="job.model_id" :key="iframeKey" :src="`${state?.ui_url || '/three-d-ui/'}?embedded=annotation&model_id=${encodeURIComponent(job.model_id)}`" title="3D点云手动选点操作台"></iframe>
+            <p class="current-tool">当前工具类型：{{ currentToolLabel }}</p>
             <div class="actions annotation-actions">
               <button class="btn ghost" :disabled="!!busy" @click="iframeKey += 1; refresh({ keepStep: true })">刷新选点进度</button>
               <button class="btn lg" :disabled="!!busy || !annotationReady" @click="finishAnnotation">选点完成，进入求解</button>
@@ -481,7 +489,7 @@ onUnmounted(() => clearInterval(timer))
             <h2 class="card-title">当前任务</h2>
             <table class="plain"><tbody>
               <tr><th>机器人</th><td>{{ config?.robot?.unit_code || '—' }}</td></tr>
-              <tr><th>当前手</th><td>{{ activeHand?.name || active.hand_id || '未选择' }}</td></tr>
+              <tr><th>当前工具类型</th><td>{{ currentToolLabel }}</td></tr>
               <tr><th>工具手臂</th><td>{{ (job.arm || form.arm) === 'left' ? '左臂' : '右臂' }}</td></tr>
               <tr><th>借助相机</th><td>{{ currentRoleLabel }}</td></tr>
               <tr><th>2D外参</th><td><span class="tag" :class="extrinsic ? 'ok' : 'bad'">{{ extrinsic?.run_id || '未生效' }}</span></td></tr>
@@ -499,6 +507,7 @@ onUnmounted(() => clearInterval(timer))
 </template>
 
 <style scoped>
+.current-tool { margin: 16px 0; padding: 12px 16px; background: #edf5f1; color: #285a43; border-radius: 6px; line-height: 1.6; }
 .hand-inner { max-width: 1280px; width: 100%; padding-top: 32px; }
 .hold-option { display: flex; align-items: center; gap: 8px; margin-top: 18px; }
 .object-options { display: flex; align-items: end; gap: 16px; flex-wrap: wrap; padding: 20px; }

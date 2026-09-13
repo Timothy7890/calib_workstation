@@ -13,6 +13,7 @@ from calib_workstation.manifest import ArtifactStore
 from calib_workstation.tool_calibration import solve_tool
 from calib_workstation.tool_workflow import install_object_routes
 from calib_workstation.calib3d import app as engine, mount_api
+from calib_workstation.calib3d.hands import canonical_hand_id, get_hand_model, hand_catalog
 
 
 def observations(points):
@@ -37,6 +38,16 @@ def test_single_tcp_has_position_but_no_invented_orientation():
     assert not result["orientation_defined"]
     assert "T_wrist2tool" not in result
     assert result["residual_mm"]["rms"] < 1e-8
+
+
+@pytest.mark.parametrize("side", ["left", "right"])
+def test_brainco_model_renamed_with_legacy_compatibility(side):
+    old, new = f"qiangnao-1-{side}", f"qiangnao-revo2-{side}"
+    assert old not in hand_catalog()
+    assert hand_catalog()[new].label == f"强脑-Revo2-{'左' if side == 'left' else '右'}"
+    assert canonical_hand_id(old) == new
+    assert get_hand_model(old) is get_hand_model(new)
+    assert get_hand_model(old).spec.hand_id == new
 
 
 def test_tool_frame_and_degenerate_data():
