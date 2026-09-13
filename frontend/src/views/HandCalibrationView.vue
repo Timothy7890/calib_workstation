@@ -1,7 +1,8 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { api } from '../api'
-import { useConfig } from '../composables/useConfig'
+import { streamUrl, useConfig } from '../composables/useConfig'
+import CameraPreview from '../components/CameraPreview.vue'
 import StepBar from '../components/StepBar.vue'
 
 const STEPS = [
@@ -58,6 +59,8 @@ function stepFromJob(value) {
 }
 
 const active = computed(() => state.value?.active || {})
+const wsUrl = computed(() => streamUrl(config.value))
+const boardSize = computed(() => config.value?.board?.size || '')
 const activeHand = computed(() =>
   (state.value?.hands || []).find((item) => item.id === active.value.hand_id),
 )
@@ -82,6 +85,12 @@ const sampleTotal = computed(() =>
 const roleOptions = computed(() =>
   Object.entries(config.value?.cameras || {}).map(([id, value]) => ({ id, ...value })),
 )
+const currentRoleLabel = computed(() =>
+  roleOptions.value.find((item) => item.id === (job.value.camera_role || form.value.camera_role))?.label
+  || job.value.camera_label
+  || form.value.camera_role,
+)
+const hasReadyPlan = computed(() => plans.value.some((item) => !item.draft))
 
 async function guard(name, fn) {
   if (busy.value) return undefined
@@ -146,6 +155,14 @@ async function loadOptions() {
   } catch (exception) {
     error.value = exception.message
   }
+}
+
+async function previewCamera() {
+  const serial = form.value.camera_serial
+  if (!serial || serial === cameras.value.current_serial) return
+  const response = await guard('camera', () => api.selectCamera(serial, form.value.camera_role))
+  if (!response) return
+  cameras.value = await api.cameras()
 }
 
 async function prepareCapture() {
@@ -250,7 +267,10 @@ async function reset() {
 watch(() => form.value.arm, loadPlans)
 watch(() => form.value.camera_role, () => {
   const remembered = cameras.value.roles?.[form.value.camera_role]?.serial
-  if (remembered) form.value.camera_serial = remembered
+  if (remembered && cameras.value.devices.some((item) => item.serial === remembered)) {
+    form.value.camera_serial = remembered
+    previewCamera()
+  }
 })
 
 let timer = null
@@ -286,21 +306,19 @@ onUnmounted(() => clearInterval(timer))
       <div class="wizard-grid">
         <main>
           <article v-if="step === 'setup'" class="card">
-            <h2 class="card-title">选择数据来源</h2>
-            <div class="source-tabs">
-              <button :class="{ active: form.source === 'capture' }" @click="form.source = 'capture'">
-                <strong>重新自动采集</strong><span>按3D计划自动运动并保存RGB-D episode</span>
-              </button>
-              <button :class="{ active: form.source === 'existing' }" @click="form.source = 'existing'">
-                <strong>使用已有数据</strong><span>检查已有路径后直接进入手动选点</span>
-              </button>
+            <div class="setup-heading">
+              <h2 class="card-title">数据来源</h2>
+              <div class="source-tabs">
+                <button :class="{ active: form.source === 'capture' }" @click="form.source = 'capture'">重新采集</button>
+                <button :class="{ active: form.source === 'existing' }" @click="form.source = 'existing'">使用已有数据</button>
+              </div>
             </div>
 
-            <div class="form-row">
-              <label class="field">相机位置
+            <div class="identity-grid">
+              <label class="field">借助相机的位置
                 <select v-model="form.camera_role"><option v-for="role in roleOptions" :key="role.id" :value="role.id">{{ role.label }}</option></select>
               </label>
-              <label class="field">当前手臂
+              <label class="field">工具所在手臂
                 <select v-model="form.arm" :disabled="form.source === 'existing'">
                   <option value="right">右臂</option><option value="left">左臂</option>
                 </select>
@@ -308,26 +326,29 @@ onUnmounted(() => clearInterval(timer))
             </div>
 
             <template v-if="form.source === 'capture'">
-              <label class="field">RGB-D相机
-                <select v-model="form.camera_serial">
+              <label class="field field-wide">相机序列号
+                <select v-model="form.camera_serial" @change="previewCamera">
                   <option value="">（请选择）</option>
                   <option v-for="camera in cameras.devices || []" :key="camera.serial" :value="camera.serial">{{ camera.serial }} · {{ camera.name }}</option>
                 </select>
               </label>
-              <label class="field">3D采集计划
+              <label class="field field-wide">3D采集计划
                 <select v-model="form.plan_id">
                   <option value="">（请选择）</option>
                   <option v-for="plan in plans" :key="plan.id" :value="plan.id" :disabled="plan.draft">{{ plan.name }} · {{ plan.sample_count }}个采样点{{ plan.draft ? '（草稿）' : '' }}</option>
                 </select>
               </label>
               <div v-if="!extrinsic" class="alert warn">当前相机位置还没有生效的2D外参，请先完成2D手眼标定。</div>
-              <div v-if="!plans.length" class="alert warn">当前手臂没有3D采集计划，请先到“采集计划”创建并完成校验。</div>
-              <div v-else-if="plans.every((plan) => plan.draft)" class="alert warn">当前手臂的3D计划均为草稿，请先完成原点与轨迹校验。</div>
-              <RouterLink v-if="!plans.length || plans.every((plan) => plan.draft)" class="btn ghost plan-link" :to="{ name: 'plans' }">前往采集计划</RouterLink>
-              <button class="btn lg" :disabled="!!busy || state?.service?.ok === false || !extrinsic || !form.camera_serial || !form.plan_id" @click="prepareCapture">下一步：接管手臂</button>
+              <div v-if="!hasReadyPlan" class="missing-plan">
+                <span>{{ plans.length ? '当前手臂的3D计划尚未完成校验。' : '当前手臂还没有3D采集计划。' }}</span>
+                <RouterLink class="btn" :to="{ name: 'plans' }">前往采集计划</RouterLink>
+              </div>
+              <div v-else class="setup-actions">
+                <button class="btn lg" :disabled="!!busy || state?.service?.ok === false || !extrinsic || !form.camera_serial || !form.plan_id" @click="prepareCapture">下一步：接管手臂</button>
+              </div>
             </template>
             <template v-else>
-              <label class="field">已拍摄任务目录
+              <label class="field field-wide">已拍摄任务目录
                 <select v-model="form.task_path">
                   <option value="">（请选择）</option>
                   <option v-for="task in tasks" :key="task.path" :value="task.path" :disabled="!!task.error">{{ task.name }} · {{ task.arm || '未知臂' }} · {{ task.episode_count }}组</option>
@@ -335,7 +356,9 @@ onUnmounted(() => clearInterval(timer))
                 <small class="mono path-hint">{{ form.task_path || '当前没有可用的历史3D采集目录' }}</small>
               </label>
               <div v-if="!extrinsic" class="alert warn">当前相机位置还没有生效的2D外参；已有数据也需要它才能完成求解。</div>
-              <button class="btn lg" :disabled="!!busy || !extrinsic || !form.task_path" @click="loadExisting">检查数据并进入手动选点</button>
+              <div class="setup-actions">
+                <button class="btn lg" :disabled="!!busy || !extrinsic || !form.task_path" @click="loadExisting">进入手动选点</button>
+              </div>
             </template>
           </article>
 
@@ -409,20 +432,29 @@ onUnmounted(() => clearInterval(timer))
           </article>
         </main>
 
-        <aside class="summary card">
-          <h2 class="card-title">当前任务</h2>
-          <table class="plain"><tbody>
-            <tr><th>机器人</th><td>{{ config?.robot?.unit_code || '—' }}</td></tr>
-            <tr><th>当前手</th><td>{{ activeHand?.name || active.hand_id || '未选择' }}</td></tr>
-            <tr><th>手臂</th><td>{{ (job.arm || form.arm) === 'left' ? '左臂' : '右臂' }}</td></tr>
-            <tr><th>相机位置</th><td>{{ job.camera_role || form.camera_role }}</td></tr>
-            <tr><th>2D外参</th><td><span class="tag" :class="extrinsic ? 'ok' : 'bad'">{{ extrinsic?.run_id || '未生效' }}</span></td></tr>
-            <tr><th>数据来源</th><td>{{ job.source === 'existing' ? '已有数据' : job.source === 'capture' ? '自动采集' : '未选择' }}</td></tr>
-            <tr><th>采集计划</th><td>{{ job.plan_name || '—' }}</td></tr>
-            <tr><th>采集进度</th><td>{{ replay?.captures?.length ?? 0 }}/{{ sampleTotal ?? '—' }}</td></tr>
-            <tr><th>选点进度</th><td>{{ annotatedCount }}/{{ episodes.length }}</td></tr>
-          </tbody></table>
-          <a v-if="state?.ui_url" class="btn ghost full" :href="state.ui_url" target="_blank" rel="noopener">新窗口打开高级操作台</a>
+        <aside class="side-column">
+          <div v-if="step !== 'annotate'" class="camera-panel">
+            <CameraPreview :url="wsUrl" :board-size="boardSize" />
+            <div class="camera-caption">
+              <span>{{ currentRoleLabel }}</span>
+              <span class="mono">{{ job.camera_serial || form.camera_serial || '未选择相机' }}</span>
+            </div>
+          </div>
+          <div class="summary card">
+            <h2 class="card-title">当前任务</h2>
+            <table class="plain"><tbody>
+              <tr><th>机器人</th><td>{{ config?.robot?.unit_code || '—' }}</td></tr>
+              <tr><th>当前手</th><td>{{ activeHand?.name || active.hand_id || '未选择' }}</td></tr>
+              <tr><th>工具手臂</th><td>{{ (job.arm || form.arm) === 'left' ? '左臂' : '右臂' }}</td></tr>
+              <tr><th>借助相机</th><td>{{ currentRoleLabel }}</td></tr>
+              <tr><th>2D外参</th><td><span class="tag" :class="extrinsic ? 'ok' : 'bad'">{{ extrinsic?.run_id || '未生效' }}</span></td></tr>
+              <tr><th>数据来源</th><td>{{ (job.source || form.source) === 'existing' ? '已有数据' : '重新采集' }}</td></tr>
+              <tr><th>采集计划</th><td>{{ job.plan_name || plans.find((item) => item.id === form.plan_id)?.name || '—' }}</td></tr>
+              <tr><th>采集进度</th><td>{{ replay?.captures?.length ?? 0 }}/{{ sampleTotal ?? '—' }}</td></tr>
+              <tr><th>选点进度</th><td>{{ annotatedCount }}/{{ episodes.length }}</td></tr>
+            </tbody></table>
+            <a v-if="state?.ui_url" class="btn ghost full" :href="state.ui_url" target="_blank" rel="noopener">新窗口打开高级操作台</a>
+          </div>
         </aside>
       </div>
     </div>
@@ -430,22 +462,25 @@ onUnmounted(() => clearInterval(timer))
 </template>
 
 <style scoped>
-.hand-inner { max-width: 1680px; width: 100%; padding-top: 28px; }
+.hand-inner { max-width: 1280px; width: 100%; padding-top: 32px; }
 .page-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
 .page-message { margin-bottom: 16px; }
-.wizard-grid { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 24px; align-items: start; }
+.wizard-grid { display: grid; grid-template-columns: minmax(0, 1fr) 400px; gap: 20px; align-items: start; }
 .wizard-grid > main { min-width: 0; }
-.source-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 22px; }
-.source-tabs button { padding: 18px; border: 1px solid #ddd; border-radius: 6px; text-align: left; background: #fafafa; }
-.source-tabs button.active { border-color: #1a1a1a; background: #f0f0f0; box-shadow: inset 0 0 0 1px #1a1a1a; }
-.source-tabs strong, .source-tabs span { display: block; }
-.source-tabs span { margin-top: 6px; color: #777; font-size: 13px; }
+.setup-heading { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding-bottom: 16px; margin-bottom: 18px; border-bottom: 1px solid #e2e2e2; }
+.setup-heading .card-title { margin: 0; }
+.source-tabs { display: inline-flex; gap: 3px; padding: 3px; border-radius: 6px; background: #e9e9e9; }
+.source-tabs button { height: 32px; padding: 0 16px; border-radius: 4px; color: #666; }
+.source-tabs button.active { background: #fff; color: #1a1a1a; box-shadow: 0 1px 3px rgb(0 0 0 / 10%); }
 .field { display: flex; flex-direction: column; gap: 7px; margin-top: 16px; }
-.field select, .field input { width: 100%; padding: 10px 12px; border: 1px solid #ccc; border-radius: 4px; background: white; }
-.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.field select, .field input { width: 100%; }
+.identity-grid { display: grid; grid-template-columns: minmax(220px, 300px) 220px; gap: 14px; align-items: end; }
+.field-wide { max-width: 680px; }
 .path-hint { margin-top: 3px; color: #888; overflow-wrap: anywhere; }
 .path-cell { overflow-wrap: anywhere; }
-.plan-link { display: inline-block; margin-top: 12px; }
+.missing-plan { display: flex; align-items: center; justify-content: space-between; gap: 16px; max-width: 680px; padding: 12px 14px; margin-top: 14px; border-radius: 5px; background: #fff3e0; color: #7a4b00; font-size: 13px; }
+.missing-plan .btn { flex: none; }
+.setup-actions { margin-top: 20px; }
 .instructions { line-height: 2; color: #555; }
 .actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 20px; }
 .run-status { display: flex; align-items: center; gap: 12px; margin: 14px 0; }
@@ -460,14 +495,22 @@ onUnmounted(() => clearInterval(timer))
 .annotation-head strong { font-size: 22px; }
 .annotation-card iframe { display: block; width: 100%; height: min(720px, calc(100dvh - 300px)); min-height: 520px; border: 0; border-top: 1px solid #ddd; border-bottom: 1px solid #ddd; }
 .annotation-actions { justify-content: flex-end; padding: 0 18px 18px; }
-.summary { position: sticky; top: 80px; }
+.side-column { position: sticky; top: 76px; min-width: 0; }
+.camera-panel { overflow: hidden; border: 1px solid #e1e1e1; border-radius: 6px; background: #fff; }
+.camera-panel :deep(.preview) { border-radius: 0; }
+.camera-caption { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; color: #666; font-size: 12px; }
+.camera-caption .mono { overflow: hidden; text-overflow: ellipsis; }
+.summary { margin-top: 14px; }
+.side-column > .summary:first-child { margin-top: 0; }
 .summary .full { display: block; width: 100%; margin-top: 18px; text-align: center; }
 @media (max-width: 1050px) {
   .wizard-grid { grid-template-columns: 1fr; }
-  .summary { position: static; }
+  .side-column { position: static; }
 }
 @media (max-width: 700px) {
-  .source-tabs, .form-row { grid-template-columns: 1fr; }
+  .setup-heading { align-items: flex-start; flex-direction: column; }
+  .identity-grid { grid-template-columns: 1fr; }
+  .field-wide { max-width: none; }
   .annotation-card iframe { min-height: 600px; }
 }
 </style>
