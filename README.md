@@ -27,6 +27,11 @@ cd /home/robot/yx/project/calib/calib_workstation
 → `scripts/camera_lock.sh acquire` 释放相机 → 8131 → 18004（`replay.sh start`）→ 前端构建（缺失时）→ 18005。
 退出时逆序停止，并只在“推流原本在跑”时才 `systemctl start` 恢复。
 
+工作站的目标相机架构是单一所有者：一个物理序列号只允许一个 SDK Pipeline，
+2D/3D 引擎以具名 consumer 共享同一份同步帧。consumer 结束不会释放设备；只有
+18005 整体退出才关闭相机，再由 `camera_lock.sh release` 恢复启动前正在运行的推流。
+这避免在两个内部流程切换的间隙被外部进程抢占相机。
+
 `camera_lock.sh acquire` 会释放两个占用 Orbbec 的程序：
 
 - 容器 `robot_control_node_all` 内的 ROS `orbbec_camera` 节点（占头部相机 `CP0X663000B7`）：直接 `pkill`，
