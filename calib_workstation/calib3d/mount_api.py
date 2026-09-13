@@ -895,25 +895,16 @@ async def api_mount_hand_hold_start(body: dict | None = None):
             return JSONResponse(
                 {"ok": False, "error": "hand_id 必须是非空字符串"}, status_code=400
             )
-        try:
-            spec = get_hand_model(hand_id.strip()).spec
-        except HandCatalogError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
-        except KeyError as exc:
+        hint = await state.get_capability_hint()
+        if not hint.get("available") or hint.get("hand_id") != hand_id.strip():
             return JSONResponse(
-                {"ok": False, "error": str(exc.args[0])}, status_code=404
+                {"ok": False, "error": "零位保持需要18000当前手的设备配置"}, status_code=409,
             )
-        device_id = device_id or VENDOR_DEVICE_IDS.get(spec.vendor)
-        side = side or spec.side
-        if device_id is None:
-            return JSONResponse(
-                {
-                    "ok": False,
-                    "error": f"手型号 {hand_id} 的厂商 {spec.vendor!r} 没有对应的 "
-                    "18089 设备映射，请显式传 device_id",
-                },
-                status_code=400,
-            )
+        configured_side = hint.get("design_side") or hint.get("arm")
+        if side and side != configured_side:
+            return JSONResponse({"ok": False, "error": "零位保持侧别与18000手配置不符"}, status_code=409)
+        device_id = hint.get("hand_web_device_id")
+        side = configured_side
     if not isinstance(device_id, str) or not device_id.strip():
         return JSONResponse(
             {"ok": False, "error": "需要 hand_id 或 device_id 以确定 18089 设备"},

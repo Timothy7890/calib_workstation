@@ -269,6 +269,8 @@ async def get_capability_hint() -> dict:
             "arm": arm_name.removesuffix("_arm") if arm_name else None,
             "hand_id": hand_id,
             "hand_name": hand.get("name") or hand_id,
+            "hand_web_device_id": hand.get("hand_web_device_id"),
+            "design_side": hand.get("design_side"),
         }
     except Exception as exc:
         return {"ok": True, "available": False, "error": str(exc)}

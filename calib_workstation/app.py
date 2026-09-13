@@ -591,9 +591,8 @@ def create_app(config: Config) -> FastAPI:
         registry = capability_registry()
         active = registry.get("active") or {}
         arm = str(active.get("arm") or "")
-        hand_id = str(active.get("hand_id") or "")
-        if arm not in ("left_arm", "right_arm") or not hand_id:
-            raise fail(409, "请先在18000选择当前激活臂和手型号")
+        if arm not in ("left_arm", "right_arm"):
+            raise fail(409, "请先在18000选择当前激活臂")
         extrinsic = active_camera_manifest("extrinsic", role_id)
         if extrinsic is None:
             raise fail(409, f"{role_label(role_id)}还没有生效的2D外参")
@@ -629,9 +628,13 @@ def create_app(config: Config) -> FastAPI:
         if plan.get("draft"):
             raise fail(409, f"计划 {plan.get('name')} 还是草稿，请先完成原点和轨迹校验")
         canonical_url = config.hand_eye_2d_url + "/three-d"
-        if plan.get("base_url") != canonical_url or plan.get("camera_serial") != serial:
+        hold_hand_zero = body.get("hold_hand_zero", False)
+        if not isinstance(hold_hand_zero, bool):
+            raise fail(422, "hold_hand_zero 必须为布尔值")
+        if plan.get("base_url") != canonical_url or plan.get("camera_serial") != serial or plan.get("hold_hand_zero") != hold_hand_zero:
             plan["base_url"] = canonical_url
             plan["camera_serial"] = serial
+            plan["hold_hand_zero"] = hold_hand_zero
             plan = replay.put(f"/api/plans/{plan_id}", plan)
         camera = api_native_camera_select({"serial": serial, "camera_role": role.id})
         if calib3d_camera.serial != serial:
@@ -642,6 +645,7 @@ def create_app(config: Config) -> FastAPI:
             calibration_kind="3d", source="capture", step="prepared",
             camera_role=role.id, camera_label=role.label, camera_serial=serial,
             arm=arm, hand_id=active.get("hand_id"), plan_id=plan_id,
+            hold_hand_zero=hold_hand_zero,
             plan_name=plan.get("name"), sample_total=sum(
                 1 for node in plan.get("nodes") or []
                 if node.get("enabled", True) and node.get("role") == "sample"

@@ -1,4 +1,5 @@
 import json
+import pytest
 
 from fastapi.testclient import TestClient
 
@@ -40,7 +41,8 @@ def test_2d_and_3d_share_one_managed_rgbd_pipeline(tmp_path):
         assert states[0].consumers == ("calib2d", "calib3d")
 
 
-def test_3d_wizard_prepares_automatic_capture_with_active_context(tmp_path, monkeypatch):
+@pytest.mark.parametrize("hand_id", [None, "unregistered-hand"])
+def test_3d_wizard_prepares_automatic_capture_with_active_context(tmp_path, monkeypatch, hand_id):
     plan = {
         "id": "plan-3d", "name": "3D right", "target": "hand_eye_3D",
         "base_url": "http://127.0.0.1:18005/three-d", "arm": "right",
@@ -58,7 +60,7 @@ def test_3d_wizard_prepares_automatic_capture_with_active_context(tmp_path, monk
         def get(self, path, **_kwargs):
             if "能力中心" in self.name:
                 return {"registry": {
-                    "active": {"arm": "right_arm", "hand_id": "hand-r", "camera_role": "head"},
+                    "active": {"arm": "right_arm", "hand_id": hand_id, "camera_role": "head"},
                     "hands": [{"id": "hand-r", "name": "Right hand"}],
                 }}
             if path == "/api/status":
@@ -119,7 +121,8 @@ def test_3d_wizard_prepares_automatic_capture_with_active_context(tmp_path, monk
         assert job["calibration_kind"] == "3d"
         assert job["step"] == "prepared"
         assert job["sample_total"] == 1
-        assert job["hand_id"] == "hand-r"
+        assert job["hand_id"] == hand_id
+        assert plan["hold_hand_zero"] is False
 
         overview = client.get("/api/hand-calibration")
         assert overview.status_code == 200

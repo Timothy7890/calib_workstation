@@ -40,6 +40,7 @@ const form = ref({
   plan_id: '',
   run_name: '',
   task_path: '',
+  hold_hand_zero: false,
 })
 
 function defaultRunId() {
@@ -171,6 +172,7 @@ async function prepareCapture() {
     arm: form.value.arm,
     camera_serial: form.value.camera_serial,
     plan_id: form.value.plan_id,
+    hold_hand_zero: form.value.hold_hand_zero,
   }))
   if (!response) return
   job.value = response.job
@@ -338,6 +340,8 @@ onUnmounted(() => clearInterval(timer))
                   <option v-for="plan in plans" :key="plan.id" :value="plan.id" :disabled="plan.draft">{{ plan.name }} · {{ plan.sample_count }}个采样点{{ plan.draft ? '（草稿）' : '' }}</option>
                 </select>
               </label>
+              <label class="hold-option"><input type="checkbox" v-model="form.hold_hand_zero" />采集期间保持灵巧手零位</label>
+              <p class="muted">标记点须相对手腕固定。点在可动手指上时，请启用零位保持；刚性工具无需启用。</p>
               <div v-if="!extrinsic" class="alert warn">当前相机位置还没有生效的2D外参，请先完成2D手眼标定。</div>
               <div v-if="!hasReadyPlan" class="missing-plan">
                 <span>{{ plans.length ? '当前手臂的3D计划尚未完成校验。' : '当前手臂还没有3D采集计划。' }}</span>
@@ -465,6 +469,7 @@ onUnmounted(() => clearInterval(timer))
 
 <style scoped>
 .hand-inner { max-width: 1280px; width: 100%; padding-top: 32px; }
+.hold-option { display: flex; align-items: center; gap: 8px; margin-top: 18px; }
 .page-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
 .page-message { margin-bottom: 16px; }
 .wizard-grid { display: grid; grid-template-columns: minmax(0, 1fr) 400px; gap: 20px; align-items: start; }
