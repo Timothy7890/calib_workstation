@@ -158,7 +158,7 @@ onMounted(load)
 
 const TYPE_LABEL = {
   extrinsic: '外参',
-  intrinsic: '内参（SDK）',
+  intrinsic: 'SDK内参存档',
   camera_transform: '内部相机转换',
   hand_mount: '灵巧手安装',
   tcp_profile: 'TCP 配置',

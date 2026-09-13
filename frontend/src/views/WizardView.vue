@@ -583,7 +583,7 @@ onUnmounted(() => clearInterval(timer))
               内点少于 8 个，结果可能不稳定；建议补充更多姿态差异大的采样点后重新采集。
             </div>
             <div v-if="job.finalized" class="alert info" style="margin-top: 14px">
-              已归档{{ job.activated ? '并设为当前生效' : '（未生效）' }}：外参 + 内参产物已写入机器人 {{ config?.robot.unit_code }} 的标定目录。
+              已归档{{ job.activated ? '并设为当前生效' : '（未生效）' }}：外参 + SDK内参存档已写入机器人 {{ config?.robot.unit_code }} 的标定目录。
             </div>
             <p class="muted" style="margin-top: 10px">
               归档到相机位置：<b>{{ job.camera_label || job.camera_role }}</b>（<span class="mono">{{ job.camera_role }}</span>）

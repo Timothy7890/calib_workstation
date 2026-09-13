@@ -81,19 +81,19 @@ function when(m) {
                 <td v-else><span class="tag bad">未标定</span></td>
               </tr>
               <tr>
-                <th>内参</th>
+                <th>SDK内参存档</th>
                 <td v-if="active?.intrinsic?.[r.id]">
-                  <span class="tag ok">生效</span> {{ when(active.intrinsic[r.id]) }}
+                  <span class="tag ok">已记录</span> {{ when(active.intrinsic[r.id]) }}
                   <div class="muted" style="margin-top: 4px">
                     {{ active.intrinsic[r.id].quality?.width }}×{{ active.intrinsic[r.id].quality?.height }} ·
                     <span class="mono">{{ active.intrinsic[r.id].camera_serial }}</span>
                   </div>
                 </td>
-                <td v-else><span class="tag">使用 SDK 内参</span></td>
+                <td v-else><span class="tag">读取自SDK</span></td>
               </tr>
               <tr>
                 <th>内部相机转换</th>
-                <td><span class="tag">使用 SDK 内参</span></td>
+                <td><span class="tag">使用SDK参数</span></td>
               </tr>
             </tbody>
           </table>
