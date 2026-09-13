@@ -841,7 +841,8 @@ button:disabled {
 }
 
 .mount-slot.paired,
-.mount-slot.saved {
+.mount-slot.saved,
+.mount-slot.model-removable {
   padding-right: 23px;
 }
 

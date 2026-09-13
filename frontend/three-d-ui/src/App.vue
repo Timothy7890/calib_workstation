@@ -1429,6 +1429,20 @@ async function clearMountSlotCloudPoint(pointId) {
   refreshHighlights()
 }
 
+function clearMountSlotModelPoint(pointId) {
+  if (mountProfileBusy.value) return
+  mountDrafts.value = mountDrafts.value.flatMap((item) => {
+    if (item.point_id !== pointId) return [item]
+    const { p_hand, p_local, link, meshFaceIndex, ...cloudDraft } = item
+    return item.vertexIndex != null ? [cloudDraft] : []
+  })
+  mountProfileDirty.value = true
+  activeMountSlotId.value = pointId
+  infoMsg.value = `已移除 ${mountSlotInfo(pointId).shortLabel} 的模型点，可重新点击模型标注；实体点保留，方案修改尚未保存`
+  refreshHighlights()
+  refreshHandPointMarkers()
+}
+
 function clearMountDrafts() {
   // Clearing model annotations must not discard pending cloud observations.
   mountDrafts.value = mountDrafts.value
@@ -2429,6 +2443,7 @@ onBeforeUnmount(() => {
                     :class="{
                       active: activeMountSlotId === slot.point_id,
                       modeled: mountDraftIds.has(slot.point_id),
+                      'model-removable': mountViewport === 'model' && mountDraftIds.has(slot.point_id),
                       paired: mountViewport === 'cloud' && mountPairedIds.has(slot.point_id),
                       'cloud-only': mountViewport === 'cloud' && mountCloudOnlyIds.has(slot.point_id),
                       saved: mountViewport === 'cloud' && mountSavedIds.has(slot.point_id),
@@ -2448,6 +2463,16 @@ onBeforeUnmount(() => {
                       {{ mountViewport === 'cloud' ? '点云待选' : '模型已选' }}
                     </small>
                     <small v-else>点云待选</small>
+                  </button>
+                  <button
+                    v-if="mountViewport === 'model' && mountDraftIds.has(slot.point_id)"
+                    class="mount-slot-clear model-point-clear"
+                    :disabled="mountProfileBusy"
+                    :aria-label="`删除 ${slot.shortLabel} 的模型点`"
+                    :title="`删除 ${slot.shortLabel} 的模型点（保留实体点）`"
+                    @click.stop="clearMountSlotModelPoint(slot.point_id)"
+                  >
+                    ×
                   </button>
                   <button
                     v-if="mountViewport === 'cloud' && (mountCloudPickedIds.has(slot.point_id) || mountSavedIds.has(slot.point_id))"

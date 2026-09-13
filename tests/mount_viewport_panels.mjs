@@ -32,6 +32,24 @@ assert.deepEqual(JSON.parse(JSON.stringify(state.mountDrafts.value)), [
   { point_id: 'cloud', vertexIndex: 2, point: [4, 5, 6] },
 ])
 assert.equal(state.mountProfileDirty.value, true)
+const deleteModelFunction = source.match(/function clearMountSlotModelPoint\(pointId\) \{[\s\S]*?\n\}/)[0]
+state.mountProfileBusy = { value: false }
+state.infoMsg = {}
+state.mountSlotInfo = point_id => ({ shortLabel: point_id })
+state.mountDrafts.value = [
+  { point_id: 'paired', vertexIndex: 0, point: [1, 2, 3], p_hand: [0, 0, 0], link: 'base_link' },
+  { point_id: 'other', p_hand: [4, 5, 6] },
+]
+runInNewContext(`${deleteModelFunction}\nclearMountSlotModelPoint('paired')`, state)
+assert.deepEqual(JSON.parse(JSON.stringify(state.mountDrafts.value)), [
+  { point_id: 'paired', vertexIndex: 0, point: [1, 2, 3] },
+  { point_id: 'other', p_hand: [4, 5, 6] },
+])
+assert.equal(state.activeMountSlotId.value, 'paired')
+// Saving a scheme serializes only remaining model points, never the deleted one.
+state.mountSlots = [{ point_id: 'paired' }, { point_id: 'other' }]
+const serializeFunction = source.match(/function currentModelPoints\(\) \{[\s\S]*?\n\}/)[0]
+assert.equal(runInNewContext(`${serializeFunction}\ncurrentModelPoints().map(p => p.point_id).join(',')`, state), 'other')
 const browser = await chromium.launch({ headless: true })
 try {
   for (const width of [1920, 1280]) {
@@ -73,7 +91,8 @@ try {
     for (const forbidden of ['缺模型点', '待保存', '安装样本与解算', '当前 episode', '18089', '写入已保存样本']) {
       assert.ok(!modelText.includes(forbidden), `Model view leaked: ${forbidden}`)
     }
-    assert.equal(await panel.locator('.mount-slot-clear').count(), 0)
+    assert.equal(await panel.locator('.mount-slot-clear:not(.model-point-clear)').count(), 0)
+    assert.equal(await panel.locator('.model-point-clear').count(), 1)
     assert.equal(await panel.locator('.mount-slot.saved, .mount-slot.paired, .mount-slot.cloud-only').count(), 0)
     await page.getByRole('button', { name: '实体点云', exact: true }).click()
     assert.ok(await panel.locator('.mount-episode-card').isVisible())
@@ -113,6 +132,13 @@ try {
     assert.ok((await panel.innerText()).includes('已选 1/20'), 'Switching views must retain model points')
     assert.equal(await panel.locator('.mount-samples-card').count(), 0)
     assert.equal(await panel.evaluate(el => el.scrollTop), 0, 'New panel must start at the top')
+    await panel.getByRole('button', { name: '删除 红1 的模型点', exact: true }).click()
+    assert.ok((await panel.innerText()).includes('已选 0/20'))
+    assert.ok((await panel.innerText()).includes('未保存修改'))
+    assert.equal(await panel.locator('.model-point-clear').count(), 0)
+    assert.ok(await page.getByRole('button', { name: '零位手模型', exact: true }).evaluate(el => el.classList.contains('active')))
+    await page.getByRole('button', { name: '实体点云', exact: true }).click()
+    assert.equal(await panel.locator('.mount-slot-clear').count(), 2, 'Removing a model point must preserve saved cloud points')
     assert.deepEqual(errors, [])
     console.log(`${width}px: model/cloud panels isolated; annotations retained; no write or control calls`)
     await page.close()
