@@ -420,7 +420,7 @@ onUnmounted(() => clearInterval(timer))
               请到「采集计划」页为其记录原点并完成校验后再回来。
             </div>
             <div class="actions">
-              <button class="btn lg" :disabled="busy || !form.camera_serial || !form.plan_id" @click="doPrepare">下一步：接管手臂</button>
+              <button class="btn lg" :disabled="busy || !form.camera_serial || !form.plan_id" @click="doPrepare">下一步</button>
             </div>
           </div>
 

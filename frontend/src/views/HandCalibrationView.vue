@@ -344,7 +344,7 @@ onUnmounted(() => clearInterval(timer))
                 <RouterLink class="btn" :to="{ name: 'plans' }">前往采集计划</RouterLink>
               </div>
               <div v-else class="setup-actions">
-                <button class="btn lg" :disabled="!!busy || state?.service?.ok === false || !extrinsic || !form.camera_serial || !form.plan_id" @click="prepareCapture">下一步：接管手臂</button>
+                <button class="btn lg" :disabled="!!busy || state?.service?.ok === false || !extrinsic || !form.camera_serial || !form.plan_id" @click="prepareCapture">下一步</button>
               </div>
             </template>
             <template v-else>
@@ -378,7 +378,9 @@ onUnmounted(() => clearInterval(timer))
               <button class="btn ghost" :disabled="!!busy || !armEngaged" @click="disarm">解除接管</button>
             </div>
             <label class="field">运行名称（可选）<input v-model.trim="form.run_name" placeholder="留空自动生成" /></label>
-            <button class="btn lg danger" :disabled="!!busy || !armEngaged" @click="runCapture">开始自动采集（手臂将自动运动）</button>
+            <div class="actions">
+              <button class="btn lg danger" :disabled="!!busy || !armEngaged" @click="runCapture">开始自动采集（手臂将自动运动）</button>
+            </div>
           </article>
 
           <article v-else-if="step === 'run'" class="card">
