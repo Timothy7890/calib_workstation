@@ -84,6 +84,14 @@ try {
     await next.click()
     await page.getByRole('button', { name: '开始求解', exact: true }).waitFor()
     assert.equal(finishCalls, 1, 'Normal view must advance without reopening the viewer or solving')
+    assert.equal(await page.locator('.camera-panel').count(), 0, 'Solve uses saved data, not a live preview')
+    assert.ok(await page.getByRole('heading', { name: '当前任务', exact: true }).isVisible())
+    // Restore a completed job without invoking the solver or publishing anything.
+    job.step = 'solved'
+    await page.reload()
+    await page.getByRole('button', { name: '确认归档并生效', exact: true }).waitFor()
+    assert.equal(await page.locator('.camera-panel').count(), 0, 'Archive must not reopen a live preview')
+    assert.ok(await page.getByRole('heading', { name: '当前任务', exact: true }).isVisible())
     await page.close()
   }
 } finally {

@@ -530,7 +530,7 @@ onUnmounted(() => clearInterval(timer))
         </main>
 
         <aside class="side-column">
-          <div v-if="step !== 'annotate'" class="camera-panel">
+          <div v-if="['setup', 'arm', 'run'].includes(step)" class="camera-panel">
             <CameraPreview :url="wsUrl" :board-size="boardSize" />
             <div class="camera-caption">
               <span>{{ currentRoleLabel }}</span>
