@@ -470,7 +470,7 @@ onUnmounted(() => clearInterval(timer))
 .setup-heading { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding-bottom: 16px; margin-bottom: 18px; border-bottom: 1px solid #e2e2e2; }
 .setup-heading .card-title { margin: 0; }
 .source-tabs { display: inline-flex; gap: 3px; padding: 3px; border-radius: 6px; background: #e9e9e9; }
-.source-tabs button { height: 32px; padding: 0 16px; border-radius: 4px; color: #666; }
+.source-tabs button { display: inline-flex; align-items: center; justify-content: center; height: 32px; padding: 0 16px; border-radius: 4px; color: #666; }
 .source-tabs button.active { background: #fff; color: #1a1a1a; box-shadow: 0 1px 3px rgb(0 0 0 / 10%); }
 .field { display: flex; flex-direction: column; gap: 7px; margin-top: 16px; }
 .field select, .field input { width: 100%; }
@@ -502,7 +502,7 @@ onUnmounted(() => clearInterval(timer))
 .camera-caption .mono { overflow: hidden; text-overflow: ellipsis; }
 .summary { margin-top: 14px; }
 .side-column > .summary:first-child { margin-top: 0; }
-.summary .full { display: block; width: 100%; margin-top: 18px; text-align: center; }
+.summary .full { display: flex; width: 100%; margin-top: 18px; }
 @media (max-width: 1050px) {
   .wizard-grid { grid-template-columns: 1fr; }
   .side-column { position: static; }
