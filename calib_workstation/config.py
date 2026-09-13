@@ -41,6 +41,7 @@ class Config:
     square_size_mm: float = 20.0
     mock: bool = False
     path: Path | None = None
+    hand_service_url: str = "http://127.0.0.1:18089"
 
     @property
     def state_path(self) -> Path:
@@ -58,6 +59,7 @@ class Config:
                 "hand_eye_2d": self.hand_eye_2d_url,
                 "replay": self.replay_url,
                 "capability": self.capability_url,
+                "hand_web": self.hand_service_url,
             },
             "data_root": str(self.data_root),
             "cameras": {
@@ -105,6 +107,7 @@ def load_config(path: str | Path | None = None, *, mock: bool = False) -> Config
         hand_eye_2d_url=str(services.get("hand_eye_2d") or "http://127.0.0.1:18005").rstrip("/"),
         replay_url=str(services.get("replay") or "http://127.0.0.1:18004").rstrip("/"),
         capability_url=str(services.get("capability") or "http://127.0.0.1:18000").rstrip("/"),
+        hand_service_url=str(services.get("hand_web") or "http://127.0.0.1:18089").strip().rstrip("/"),
         rgbd_calibration_path=Path(
             camera.get("rgbd_calibration")
             or "/home/robot/yx/project/IK_replay/config/camera/orbbec_rgbd_calibration.json"

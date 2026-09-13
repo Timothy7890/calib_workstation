@@ -19,6 +19,7 @@ def configure(
     rgbd_calibration_path: Path,
     capability_url: str,
     mock: bool,
+    hand_service_url: str = "http://127.0.0.1:18089",
 ) -> ManagedRGBDCamera:
     arm = os.environ.get("CALIB_DEFAULT_ARM", "right").strip()
     if arm not in ("left", "right"):
@@ -64,6 +65,7 @@ def configure(
         data_root / "_hand_eye_3d" / "mount_model_profiles"
     ).resolve()
     app_module.capability_url = capability_url.rstrip("/")
+    app_module.hand_service_url = hand_service_url.rstrip("/")
     app_module.capability_snapshot = None
     app_module.workstation_data_root = data_root.resolve()
     app_module.init_state()

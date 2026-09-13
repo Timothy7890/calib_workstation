@@ -56,6 +56,7 @@ sudo visudo -c
 |---|---|
 | 机器人编号 | **不在配置文件里**。首次打开页面时输入（右上角可切换），保存在 `<data_root>/workstation_state.json`；是产物目录第一层 |
 | `services.*` | 18005 原生 2D/3D、18004、18000 地址 |
+| `services.hand_web` | 灵巧手零位保持服务地址，默认 `http://127.0.0.1:18089`；18089启用TLS时才使用 `https://`。修改后需安全退出并重启工作站 |
 | `data_root` | 产物根目录 → `<data_root>/<unit_code>/calibrations/…`；2D 兜底会话目录在 `<data_root>/_hand_eye_2d_sessions/`（正式采集落回放运行目录） |
 | `cameras.head|waist` | 标签、回放计划目标（`hand_eye_2D_head|waist`）、可选序列号（留空则向导里从枚举结果选） |
 | `board` | 棋盘格内角点 `11x8`、默认方格边长 |
