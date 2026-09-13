@@ -64,6 +64,7 @@ const mountExcludedIds = ref(new Set())   // 第二步不信任、排除的贴�
 const mountResultCard = ref(null)
 const overlayVisible = ref(false)
 const mountViewport = ref('model')
+const selectionPanel = ref(null)
 const handViewerHost = ref(null)
 const handHold = ref(null)
 const handHoldBusy = ref(false)
@@ -1429,7 +1430,10 @@ async function clearMountSlotCloudPoint(pointId) {
 }
 
 function clearMountDrafts() {
-  mountDrafts.value = []
+  // Clearing model annotations must not discard pending cloud observations.
+  mountDrafts.value = mountDrafts.value
+    .filter((item) => item.vertexIndex != null)
+    .map(({ p_hand, p_local, link, meshFaceIndex, ...cloudDraft }) => cloudDraft)
   mountProfileDirty.value = true
   activeMountSlotId.value = mountSlots[0].point_id
   mountViewport.value = 'model'
@@ -2069,6 +2073,7 @@ watch(selectedHandId, async (value, oldValue) => {
 
 watch(mountViewport, async () => {
   await nextTick()
+  if (selectionPanel.value) selectionPanel.value.scrollTop = 0
   resizeViewer()
   resizeHandViewer()
 })
@@ -2297,7 +2302,7 @@ onBeforeUnmount(() => {
         <div v-else-if="infoMsg" class="message success">{{ infoMsg }}</div>
       </section>
 
-      <aside class="selection-panel">
+      <aside ref="selectionPanel" class="selection-panel">
         <div class="mode-tabs">
           <button :class="{ active: mode === 'marker' }" @click="setMode('marker')">
             Marker 标定
@@ -2311,23 +2316,16 @@ onBeforeUnmount(() => {
           <section class="side-card">
             <div class="panel-heading compact">
               <div>
-                <h2>1. 选择零位手模型</h2>
-                <span>模型显示在中央大视区 · mesh 表面可点击</span>
+                <h2>{{ mountViewport === 'model' ? '1. 选择模型' : '1. 当前手型号' }}</h2>
               </div>
-              <span class="zero-badge">6 DOF = 0</span>
+              <span v-if="mountViewport === 'model'" class="zero-badge">零位模型</span>
             </div>
             <select v-model="selectedHandId" class="hand-select" :disabled="handBusy">
               <option v-for="hand in hands" :key="hand.hand_id" :value="hand.hand_id">
                 {{ hand.label }}（{{ hand.side === 'left' ? '左手' : '右手' }}）
               </option>
             </select>
-            <p class="model-meta">
-              {{ currentHand?.vendor || '—' }} · {{ handModel?.base_link || '等待模型' }}
-            </p>
-            <button class="secondary-button model-focus-button" @click="mountViewport = 'model'">
-              在中央查看并选择模型点
-            </button>
-            <div class="hand-hold-row">
+            <div v-if="mountViewport === 'cloud'" class="hand-hold-row">
               <button
                 class="secondary-button hand-hold-button"
                 :class="{ holding: handHold?.running }"
@@ -2346,7 +2344,7 @@ onBeforeUnmount(() => {
             </div>
           </section>
 
-          <section class="side-card mount-profile-card">
+          <section v-if="mountViewport === 'model'" class="side-card mount-profile-card">
             <div class="panel-heading compact">
               <div>
                 <h2>2. 模型点方案</h2>
@@ -2411,10 +2409,11 @@ onBeforeUnmount(() => {
           <section class="side-card mount-slots-card">
             <div class="panel-heading compact">
               <div>
-                <h2>3. 手模型上的模型点（红 8 · 绿 8 · 黄 2 · 粉 2）</h2>
-                <span>
-                  已完成 {{ mountDraftIds.size }}/{{ mountSlots.length }} · 只标你信任的点即可 · 与实体点无先后顺序，保存时按槽位配对
+                <h2>{{ mountViewport === 'model' ? '3. 模型选点' : '2. 实体选点' }}</h2>
+                <span v-if="mountViewport === 'model'">
+                  已选 {{ mountDraftIds.size }}/{{ mountSlots.length }} · 选择编号后，点击模型表面
                 </span>
+                <span v-else>选择编号后，点击点云中对应的标记点</span>
               </div>
             </div>
             <div v-for="group in mountSlotGroups" :key="group.side" class="mount-slot-section">
@@ -2430,16 +2429,17 @@ onBeforeUnmount(() => {
                     :class="{
                       active: activeMountSlotId === slot.point_id,
                       modeled: mountDraftIds.has(slot.point_id),
-                      paired: mountPairedIds.has(slot.point_id),
-                      'cloud-only': mountCloudOnlyIds.has(slot.point_id),
-                      saved: mountSavedIds.has(slot.point_id),
+                      paired: mountViewport === 'cloud' && mountPairedIds.has(slot.point_id),
+                      'cloud-only': mountViewport === 'cloud' && mountCloudOnlyIds.has(slot.point_id),
+                      saved: mountViewport === 'cloud' && mountSavedIds.has(slot.point_id),
                     }"
                     :title="`${slot.label}（${slot.point_id}）`"
                     @click="activateMountSlot(slot.point_id)"
                   >
                     <i :style="{ background: slot.color }"></i>
                     <span>{{ slot.shortLabel }}</span>
-                    <small v-if="mountPendingDeleteIds.has(slot.point_id) && !mountCloudPickedIds.has(slot.point_id)" class="pending-delete">待删除</small>
+                    <small v-if="mountViewport === 'model'">{{ mountDraftIds.has(slot.point_id) ? '已选' : '待选' }}</small>
+                    <small v-else-if="mountPendingDeleteIds.has(slot.point_id) && !mountCloudPickedIds.has(slot.point_id)" class="pending-delete">待删除</small>
                     <small v-else-if="mountPairedIds.has(slot.point_id)">待保存</small>
                     <small v-else-if="mountCloudOnlyIds.has(slot.point_id)" class="missing-model">待保存·缺模型点</small>
                     <small v-else-if="mountSavedMissingModelIds.has(slot.point_id)" class="missing-model">已保存·缺模型点</small>
@@ -2447,10 +2447,10 @@ onBeforeUnmount(() => {
                     <small v-else-if="mountDraftIds.has(slot.point_id)">
                       {{ mountViewport === 'cloud' ? '点云待选' : '模型已选' }}
                     </small>
-                    <small v-else>模型待选</small>
+                    <small v-else>点云待选</small>
                   </button>
                   <button
-                    v-if="mountCloudPickedIds.has(slot.point_id) || mountSavedIds.has(slot.point_id)"
+                    v-if="mountViewport === 'cloud' && (mountCloudPickedIds.has(slot.point_id) || mountSavedIds.has(slot.point_id))"
                     class="mount-slot-clear"
                     :class="{ armed: mountPendingDeleteIds.has(slot.point_id) }"
                     :title="mountCloudPickedIds.has(slot.point_id)
@@ -2479,15 +2479,7 @@ onBeforeUnmount(() => {
                 去零位手模型选理论点
               </button>
               <button
-                v-else
-                class="primary-button"
-                :disabled="!selectedEpisode"
-                @click="mountViewport = 'cloud'"
-              >
-                去点云选实体点
-              </button>
-              <button
-                v-if="mountViewport === 'model'"
+                v-if="mountViewport === 'cloud'"
                 class="secondary-button"
                 :disabled="!canApplyModelPoints"
                 :title="mountSamplesApplicable ? `把当前模型点写入 ${mountSamplesApplicable} 条已保存样本` : '没有可更新的已保存样本'"
@@ -2496,6 +2488,7 @@ onBeforeUnmount(() => {
                 {{ mountProfileBusy ? '写入中…' : `写入已保存样本（${mountSamplesApplicable}）` }}
               </button>
               <button
+                v-if="mountViewport === 'model'"
                 class="text-button"
                 :disabled="!mountDraftIds.size"
                 @click="clearMountDrafts"
@@ -2505,10 +2498,10 @@ onBeforeUnmount(() => {
             </div>
           </section>
 
-          <section class="side-card">
+          <section v-if="mountViewport === 'cloud'" class="side-card mount-episode-card">
             <div class="panel-heading compact">
               <div>
-                <h2>4. 当前 episode 实体点</h2>
+                <h2>3. 当前 episode 实体点</h2>
                 <span>
                   {{ mountCloudPickedIds.size }} 个待保存 · {{ mountSavedForEpisode.length }} 个已保存<template v-if="mountPendingDeleteIds.size"> · {{ mountPendingDeleteIds.size }} 个待删除</template>
                   <template v-if="mountSavedMissingModelIds.size"> · 已保存中 {{ mountSavedMissingModelIds.size }} 个缺模型点</template>
@@ -2533,14 +2526,14 @@ onBeforeUnmount(() => {
             </button>
             <p class="mount-save-hint">
               点云点可单独保存，选 1 个即可，无需凑齐。
-              <template v-if="mountCloudOnlyIds.size">其中 {{ mountCloudOnlyIds.size }} 个还没有模型点，会先按"缺模型点"保存；到「零位手模型」标好后点「写入已保存样本」补齐。</template>
+              <template v-if="mountCloudOnlyIds.size">其中 {{ mountCloudOnlyIds.size }} 个还没有模型点；在「零位手模型」标好后，切回此页点「写入已保存样本」补齐。</template>
             </p>
           </section>
 
-          <section class="side-card mount-samples-card">
+          <section v-if="mountViewport === 'cloud'" class="side-card mount-samples-card">
             <div class="panel-heading compact">
               <div>
-                <h2>5. 安装样本与解算</h2>
+                <h2>4. 安装样本与解算</h2>
                 <span>
                   {{ mountSamples.length }} 条样本 · {{ mountSamplesByPose }} 个姿态
                   <template v-if="mountSamplesMissingModel"> · <b class="missing-model">{{ mountSamplesMissingModel }} 条缺模型点（解算跳过）</b></template>
@@ -2689,7 +2682,7 @@ onBeforeUnmount(() => {
           </section>
 
           <section
-            v-if="mountResult"
+            v-if="mountViewport === 'cloud' && mountResult"
             ref="mountResultCard"
             class="side-card mount-result-card"
           >
