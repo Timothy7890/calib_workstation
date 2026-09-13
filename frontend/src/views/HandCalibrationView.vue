@@ -30,6 +30,9 @@ const error = ref('')
 const notice = ref('')
 const busy = ref('')
 const iframeKey = ref(0)
+const annotationFullscreen = ref(false)
+const armBusy = ref('')
+const stopping = ref(false)
 const publishResult = ref(null)
 const handSerial = ref('')
 const models = ref([])
@@ -38,7 +41,7 @@ let objectContextKey = ''
 const generic = computed(() => ['tool', 'tcp'].includes(job.value.object_mode))
 async function selectObject() {
   const response = await guard('object', () => api.selectCalibrationObject(objectForm.value))
-  if (response) { job.value = response.job; iframeKey.value += 1; await refresh({ keepStep: true }) }
+  if (response) { job.value = response.job; iframeKey.value += 1; annotationFullscreen.value = true; await refresh({ keepStep: true }) }
 }
 async function pointsUpdated(value) { job.value = value; await refresh({ keepStep: true }) }
 const archiveRunId = ref(defaultRunId())
@@ -85,8 +88,11 @@ const extrinsic = computed(() => state.value?.camera_artifacts?.extrinsic || nul
 const mount = computed(() => state.value?.mount || {})
 const result = computed(() => mount.value?.result || null)
 const isRunning = computed(() => RUNNING.has(replay.value?.state))
-const runFinished = computed(() => ['completed', 'stopped', 'fault'].includes(replay.value?.state))
 const armEngaged = computed(() => !!replay.value?.arm?.engaged)
+const recoveryReady = computed(() => ['idle', 'armed', 'completed', 'stopped', 'fault'].includes(replay.value?.state))
+const canRecover = computed(() => recoveryReady.value && armEngaged.value && !armBusy.value && !stopping.value)
+const canAnnotateCapture = computed(() => recoveryReady.value && !!job.value.run_dir)
+const fullscreen = computed(() => step.value === 'annotate' && annotationFullscreen.value)
 const progress = computed(() => replay.value?.progress || {})
 const annotatedCount = computed(() => episodes.value.filter(
   (item) => Number(item.mount_sample_count || 0) > 0,
@@ -165,6 +171,7 @@ async function refresh({ keepStep = false } = {}) {
     syncForm()
     if (!keepStep) step.value = stepFromJob(job.value)
   } catch (exception) {
+    replay.value = null
     error.value = exception.message
   }
 }
@@ -217,12 +224,28 @@ async function loadExisting() {
 }
 
 const engage = () => guard('engage', async () => { await api.engage(); await refresh({ keepStep: true }) })
-const guide = () => guard('guide', async () => { await api.guide(); await refresh({ keepStep: true }) })
-const catchHold = () => guard('catch', async () => { await api.catchHold(); await refresh({ keepStep: true }) })
-const disarm = () => guard('disarm', async () => { await api.disarm(); await refresh({ keepStep: true }) })
+async function recoverArm(action) {
+  if (!canRecover.value) return
+  if (action === 'guide' && !confirm('手臂将进入卸力拖动模式，请先扶稳手臂并清空周围空间。继续？')) return
+  if (action === 'disarm' && !confirm('即将结束接管，工作站将不再保持手臂。请确认已扶稳或安全支撑手臂。继续？')) return
+  armBusy.value = action
+  error.value = ''
+  try { await ({ guide: api.guide, catch: api.catchHold, disarm: api.disarm })[action]() }
+  catch (e) { error.value = e.message }
+  finally { armBusy.value = ''; await refresh({ keepStep: true }) }
+}
+const guide = () => recoverArm('guide')
+const catchHold = () => recoverArm('catch')
+const disarm = () => recoverArm('disarm')
 const pause = () => guard('pause', async () => { await api.pause(); await refresh({ keepStep: true }) })
 const resume = () => guard('resume', async () => { await api.resume(); await refresh({ keepStep: true }) })
-const stop = () => guard('stop', async () => { await api.stop(); await refresh({ keepStep: true }) })
+async function stop() {
+  if (stopping.value) return
+  stopping.value = true
+  try { await api.stop() }
+  catch (e) { error.value = e.message }
+  finally { stopping.value = false; await refresh({ keepStep: true }) }
+}
 
 async function runCapture() {
   const armName = job.value.arm === 'left' ? '左臂' : '右臂'
@@ -302,14 +325,14 @@ onMounted(async () => {
   await refresh()
   await loadOptions()
   timer = setInterval(() => {
-    if (['arm', 'run', 'annotate'].includes(step.value)) refresh({ keepStep: true })
+    refresh({ keepStep: true })
   }, 2000)
 })
 onUnmounted(() => clearInterval(timer))
 </script>
 
 <template>
-  <section class="page hand-wizard">
+  <section class="page hand-wizard" :class="{ 'annotation-fullscreen': fullscreen }">
     <div class="page-inner hand-inner">
       <div class="page-heading">
         <div>
@@ -317,10 +340,23 @@ onUnmounted(() => clearInterval(timer))
           <p class="page-desc">自动采集后选择标定对象：已知手模型、普通刚性工具或单点TCP，再选点、求解与归档。</p>
         </div>
         <button v-if="job.calibration_kind === '3d'" class="btn ghost" :disabled="!!busy || isRunning" @click="reset">重新开始</button>
-        <button v-if="armEngaged || isRunning" class="btn danger" @click="api.stop().catch(e => error = e.message)">立即停止（保持手臂）</button>
       </div>
 
       <StepBar :steps="STEPS" :current="step" />
+      <div class="arm-recovery" aria-label="机械臂控制">
+        <div><strong>{{ replay?.arm?.arm === 'left' ? '左臂' : replay?.arm?.arm === 'right' ? '右臂' : '机械臂' }}</strong>
+          <span>{{ !replay || replay.state === 'unavailable' ? '状态不可用' : !armEngaged ? '未接管' : isRunning ? '轨迹运行 / 暂停中' : replay?.arm?.guide || replay?.arm?.float ? '卸力拖动中' : '已接管 · 保持中' }}</span>
+        </div>
+        <div class="arm-buttons">
+          <button class="btn danger" :disabled="stopping" @click="stop">{{ stopping ? '正在停止…' : '立即停止' }}</button>
+          <button class="btn ghost" :disabled="!canRecover" @click="guide">卸力拖动</button>
+          <button class="btn ghost" :disabled="!canRecover" @click="catchHold">保持</button>
+          <button class="btn ghost" :disabled="!canRecover" @click="disarm">结束接管</button>
+          <button v-if="fullscreen" class="btn" @click="annotationFullscreen = false">退出全屏</button>
+        </div>
+        <small v-if="isRunning">需先停止轨迹，才能拖动或结束接管。软件停止不能替代实体急停。</small>
+        <small v-else-if="armEngaged">采集结束或停止后仍保持手臂；卸力拖动和结束接管前请扶稳手臂。</small>
+      </div>
       <div v-if="error" class="alert page-message">{{ error }}</div>
       <div v-if="notice" class="alert info page-message">{{ notice }}</div>
       <div v-if="state && !state.service?.ok" class="alert warn page-message">
@@ -394,16 +430,13 @@ onUnmounted(() => clearInterval(timer))
             <h2 class="card-title">接管{{ job.arm === 'left' ? '左' : '右' }}臂并放到计划原点</h2>
             <ol class="instructions">
               <li>确认没有其他程序控制手臂，点击“接管”。</li>
-              <li>使用“协力拖动”将手臂移动到计划原点附近，全程扶住手臂。</li>
-              <li>点击“接住保持”，确认标记点和手部处于相机有效深度范围。</li>
+              <li>使用上方“卸力拖动”将手臂移动到计划原点附近，全程扶住手臂。</li>
+              <li>点击上方“保持”，确认标记点和手部处于相机有效深度范围。</li>
               <li>在急停位置监护，然后开始自动采集。</li>
             </ol>
             <div class="actions">
               <span class="tag" :class="armEngaged ? 'ok' : ''">{{ armEngaged ? '已接管' : '未接管' }}</span>
               <button class="btn" :disabled="!!busy || armEngaged" @click="engage">接管</button>
-              <button class="btn ghost" :disabled="!!busy || !armEngaged" @click="guide">协力拖动</button>
-              <button class="btn ghost" :disabled="!!busy || !armEngaged" @click="catchHold">接住保持</button>
-              <button class="btn ghost" :disabled="!!busy || !armEngaged" @click="disarm">解除接管</button>
             </div>
             <label class="field">运行名称（可选）<input v-model.trim="form.run_name" placeholder="留空自动生成" /></label>
             <div class="actions">
@@ -419,8 +452,8 @@ onUnmounted(() => clearInterval(timer))
             <div class="actions">
               <button class="btn warn" :disabled="!!busy || !isRunning || replay?.state === 'paused'" @click="pause">当前节点后暂停</button>
               <button class="btn ghost" :disabled="!!busy || replay?.state !== 'paused'" @click="resume">继续</button>
-              <button class="btn danger" :disabled="!!busy || !isRunning" @click="stop">立即停止</button>
-              <button class="btn" :disabled="!!busy || !runFinished" @click="enterAnnotation">{{ replay?.state === 'completed' ? '采集完成，进入手动选点' : '使用已采集数据进入选点' }}</button>
+              <button class="btn danger" :disabled="stopping || !isRunning" @click="stop">立即停止</button>
+              <button class="btn" :disabled="!!busy || !canAnnotateCapture" @click="enterAnnotation">{{ replay?.state === 'completed' ? '采集完成，进入手动选点' : '使用已采集数据进入选点' }}</button>
             </div>
           </article>
 
@@ -434,6 +467,7 @@ onUnmounted(() => clearInterval(timer))
               <label v-if="objectForm.mode === 'hand'" class="field">几何模型<select v-model="objectForm.model_id"><option value="">请选择与实体一致的模型</option><option v-for="model in models.filter(m => m.side === job.arm)" :key="model.hand_id" :value="model.hand_id">{{ model.label }}</option></select></label>
               <label v-else class="field">工具编号<input v-model.trim="objectForm.tool_id" placeholder="例如 probe-01" /></label>
               <button class="btn" :disabled="!!busy" @click="selectObject">确认对象</button>
+              <button v-if="job.object_mode" class="btn ghost" @click="annotationFullscreen = true">全屏选点</button>
             </div>
             <ToolPointPicker v-if="generic" :job="job" :episodes="episodes" @updated="pointsUpdated" />
             <iframe v-else-if="job.model_id" :key="iframeKey" :src="`${state?.ui_url || '/three-d-ui/'}?embedded=annotation&model_id=${encodeURIComponent(job.model_id)}`" title="3D点云手动选点操作台"></iframe>
@@ -508,6 +542,22 @@ onUnmounted(() => clearInterval(timer))
 
 <style scoped>
 .current-tool { margin: 16px 0; padding: 12px 16px; background: #edf5f1; color: #285a43; border-radius: 6px; line-height: 1.6; }
+.arm-recovery { position: sticky; top: 64px; z-index: 15; display: flex; align-items: center; gap: 12px 20px; flex-wrap: wrap; padding: 12px 16px; margin-bottom: 18px; border: 1px solid #ddd; border-radius: 6px; background: #fff; box-shadow: 0 2px 8px #00000008; }
+.arm-recovery strong { margin-right: 12px; }
+.arm-recovery span, .arm-recovery small { color: #666; }
+.arm-recovery small { flex-basis: 100%; }
+.arm-buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
+.annotation-fullscreen { position: fixed; inset: 0; z-index: 100; padding: 0; background: #fff; overflow: hidden; }
+.annotation-fullscreen .hand-inner { max-width: none; width: 100%; height: 100dvh; padding: 8px; margin: 0; display: flex; flex-direction: column; box-sizing: border-box; }
+.annotation-fullscreen .page-heading, .annotation-fullscreen :deep(.steps), .annotation-fullscreen .side-column, .annotation-fullscreen .object-options, .annotation-fullscreen .current-tool, .annotation-fullscreen .annotation-head { display: none; }
+.annotation-fullscreen .arm-recovery { position: static; flex: none; margin-bottom: 8px; }
+.annotation-fullscreen .page-message { flex: none; max-height: 90px; overflow: auto; margin-bottom: 8px; }
+.annotation-fullscreen .wizard-grid { display: flex; flex: 1; min-height: 0; }
+.annotation-fullscreen .wizard-grid > main { flex: 1; min-height: 0; }
+.annotation-fullscreen .annotation-card { height: 100%; display: flex; flex-direction: column; }
+.annotation-fullscreen .annotation-card iframe { flex: 1; height: 0; min-height: 0; }
+.annotation-fullscreen :deep(.tool-picker) { flex: 1; min-height: 0; overflow: auto; }
+.annotation-fullscreen .annotation-actions { flex: none; margin: 0; padding: 8px 14px; }
 .hand-inner { max-width: 1280px; width: 100%; padding-top: 32px; }
 .hold-option { display: flex; align-items: center; gap: 8px; margin-top: 18px; }
 .object-options { display: flex; align-items: end; gap: 16px; flex-wrap: wrap; padding: 20px; }

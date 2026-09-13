@@ -996,18 +996,26 @@ def create_app(config: Config) -> FastAPI:
         job().update(step="engaged")
         return {"ok": True, **result}
 
+    def require_manual_arm_control():
+        status = replay.get("/api/status")
+        if status.get("state") not in {"idle", "armed", "completed", "stopped", "fault"}:
+            raise fail(409, "请先停止轨迹并等待停止完成，再拖动、保持或结束接管")
+        if not (status.get("arm") or {}).get("engaged"):
+            raise fail(409, "机械臂尚未接管")
+
     @app.post("/api/calibration/guide")
     def api_guide():
-        _require_job()
+        require_manual_arm_control()
         return replay.post("/api/control/guide")
 
     @app.post("/api/calibration/catch")
     def api_catch():
-        _require_job()
+        require_manual_arm_control()
         return replay.post("/api/control/catch")
 
     @app.post("/api/calibration/disarm")
     def api_disarm():
+        require_manual_arm_control()
         result = replay.post("/api/control/disarm")
         data = job().snapshot()
         if data.get("step") in {"engaged", "prepared"}:
@@ -1062,9 +1070,7 @@ def create_app(config: Config) -> FastAPI:
             n = len(list(Path(run_dir).glob("episode_*/data.json")))
             if n < 1:
                 raise fail(409, "本次运行没有生成有效的3D episode")
-            # 自动轨迹已经返回原点；进入离线点选前释放18004的手臂控制。
-            if (status.get("arm") or {}).get("engaged"):
-                replay.post("/api/control/disarm")
+            # 选点是离线操作，不隐式撤销保持；由操作员通过“结束接管”安全交接。
             local_3d_payload(await calib3d_app.api_offline_switch_task({"path": str(run_dir)}))
             return {"ok": True, "job": job().update(
                 step="annotating", run_dir=str(run_dir), sample_count=n,
