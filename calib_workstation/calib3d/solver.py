@@ -1044,18 +1044,35 @@ def solve_hand_mount_two_stage(
         stats["per_observation"] = obs_residual[idx].tolist()
         by_pose[name] = stats
     used_obs = np.array([name in used_ids for name in obs_points], dtype=bool)
+    # Keep all-point diagnostics separate from the actual solve population.
+    diagnostic_by_point, diagnostic_by_pose = by_point, by_pose
+    by_point = {name: stats for name, stats in by_point.items() if name in used_ids}
+    by_pose = {}
+    used_pose_ids = sorted(set(obs_poses[used_obs]))
+    for name in used_pose_ids:
+        errors = obs_residual[used_obs & (obs_poses == name)]
+        by_pose[name] = {**_residual_stats(errors), "per_observation": errors.tolist()}
+    used_stage1_errors = [
+        observation["deviation_mm"]
+        for point in stage1["points"]
+        if point["point_id"] in used_ids and point["pose_count"] >= 2
+        for observation in point["per_pose"]
+        if not observation["outlier"]
+    ]
 
     rpy = rot_to_rpy(R)
     return {
         "mode": "hand_mount_two_stage",
+        "residual_scope": "participating_points",
         "num_samples": int(used_obs.sum()),
         "observation_count": int(len(point_array)),
         "point_count": len(used_ids),
-        "pose_count": int(len(set(pose_array))),
+        "pose_count": len(used_pose_ids),
+        "input_pose_count": int(len(set(pose_array))),
         "point_ids": used_ids,
         "excluded_point_ids": sorted(excluded & set(mean_by_point)),
         "no_model_point_ids": no_model_ids,
-        "pose_ids": sorted(set(pose_array)),
+        "pose_ids": used_pose_ids,
         "T_wrist2hand": make_T(R, t).tolist(),
         "R_wrist2hand": R.tolist(),
         "t_wrist2hand_m": t.tolist(),
@@ -1069,6 +1086,9 @@ def solve_hand_mount_two_stage(
             "collinearity": rigid["collinearity"],
         },
         "stage1": stage1,
+        "stage1_used_stats_mm": (
+            _residual_stats(np.asarray(used_stage1_errors)) if used_stage1_errors else None
+        ),
         # 兼容旧字段：逐观测残差（仅统计参与第二步的观测）
         "residual_mm": {
             "per_sample": obs_residual[used_obs].tolist(),
@@ -1076,6 +1096,8 @@ def solve_hand_mount_two_stage(
         },
         "residual_by_point_mm": by_point,
         "residual_by_pose_mm": by_pose,
+        "diagnostic_residual_by_point_mm": diagnostic_by_point,
+        "diagnostic_residual_by_pose_mm": diagnostic_by_pose,
         "collinearity": rigid["collinearity"],
     }
 

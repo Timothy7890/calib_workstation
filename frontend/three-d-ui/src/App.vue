@@ -4,6 +4,7 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { PLYLoader } from 'three/addons/loaders/PLYLoader.js'
 import { STLLoader } from 'three/addons/loaders/STLLoader.js'
+import { participatingResultStats } from './mountResultStats'
 
 const viewerHost = ref(null)
 const status = ref(null)
@@ -337,8 +338,17 @@ const mountLooSummary = computed(() => {
     p95: Number(loo.stats_mm.p95).toFixed(2),
   }
 })
+const mountResultStats = computed(() => participatingResultStats(mountResult.value))
+const mountResultStage1Summary = computed(() => {
+  const stats = mountResultStats.value.stage1
+  return stats ? { rms: Number(stats.rms).toFixed(2), count: stats.count } : null
+})
+const mountResultSelectionChanged = computed(() =>
+  JSON.stringify([...mountExcludedIds.value].sort())
+    !== JSON.stringify([...(mountResult.value?.excluded_point_ids || [])].sort()),
+)
 const mountPoseResidualRows = computed(() =>
-  Object.entries(mountResult.value?.residual_by_pose_mm || {})
+  Object.entries(mountResultStats.value.poses)
     .map(([poseId, stats]) => ({
       poseId,
       count: Number(stats.count) || 0,
@@ -348,7 +358,7 @@ const mountPoseResidualRows = computed(() =>
     .sort((a, b) => b.rms - a.rms),
 )
 const mountPointResidualRows = computed(() =>
-  Object.entries(mountResult.value?.residual_by_point_mm || {})
+  Object.entries(mountResultStats.value.points)
     .map(([pointId, stats]) => ({
       pointId,
       label: mountSlotInfo(pointId).shortLabel,
@@ -1509,6 +1519,7 @@ async function refreshMountResult() {
   if (!response.ok) throw await responseError(response, '安装标定结果加载失败')
   const data = await response.json()
   mountResult.value = data.result || null
+  mountExcludedIds.value = new Set(data.result?.excluded_point_ids || [])
   mountResultStale.value = Boolean(data.stale)
 }
 
@@ -2618,8 +2629,8 @@ onBeforeUnmount(() => {
 
             <div class="stage-block">
               <div class="stage-head">
-                <b>① 点云一致性</b>
-                <small>只用实体点，不需要模型点。同一贴纸在各姿态搬到腕系后应重合；离散度 = 外参 + FK + 选点误差</small>
+                <b>① 点云一致性（全部贴纸）</b>
+                <small>全量诊断，不随②勾选改变。只用实体点，不需要模型点；误差包含外参、机械臂运动学和选点误差。</small>
               </div>
               <button
                 class="secondary-button"
@@ -2629,9 +2640,9 @@ onBeforeUnmount(() => {
                 {{ mountConsistencyBusy ? '检查中…' : '运行一致性检查' }}
               </button>
               <div v-if="mountStage1Summary" class="result-summary">
-                <div><span>跨姿态 RMS</span><strong>{{ mountStage1Summary.rms }} mm</strong></div>
+                <div><span>全量跨姿态 RMS</span><strong>{{ mountStage1Summary.rms }} mm</strong></div>
                 <div><span>最大偏差</span><strong>{{ mountStage1Summary.max }} mm</strong></div>
-                <div><span>观测</span><strong>{{ mountStage1Summary.count }}</strong></div>
+                <div><span>剔除离群后观测</span><strong>{{ mountStage1Summary.count }}</strong></div>
               </div>
               <ul v-if="mountStage1Outliers.length" class="outlier-list">
                 <li v-for="o in mountStage1Outliers" :key="o.point_id + o.pose_id">
@@ -2716,7 +2727,7 @@ onBeforeUnmount(() => {
                 <h2>安装标定结果</h2>
                 <span>
                   {{ mountResult.num_samples }} 个观测 ·
-                  {{ mountResult.pose_count }} 个姿态 ·
+                  {{ mountResultStats.poseCount ?? '—' }} 个参与姿态 ·
                   {{ mountResult.point_count }} 张贴纸<template v-if="mountResult.excluded_point_ids?.length">（排除 {{ mountResult.excluded_point_ids.length }}）</template>
                 </span>
               </div>
@@ -2728,13 +2739,16 @@ onBeforeUnmount(() => {
                 {{ mountQualitySummary.label }}
               </strong>
             </div>
+            <p class="result-scope-note">以下误差和排名仅统计本次解算参与的贴纸。①为这些贴纸剔除离群后的腕系一致性；逐观测误差包含它们的全部观测。</p>
+            <p v-if="mountResultSelectionChanged" class="result-scope-note">勾选已变化，以下仍是上次解算结果，请重新解算后查看。</p>
+            <p v-if="!mountResultStats.complete" class="result-scope-note">旧结果缺少可核对的逐观测记录，已隐藏混合范围的姿态排名；请重新解算。</p>
             <a
               class="mount-diagnostics-link"
               :href="mountDiagnosticsFrontendUrl"
               target="_blank"
               rel="noreferrer"
             >
-              在 7015 查看点序、对应连线与逐姿态误差
+              在 7015 查看全量对应关系诊断（含已排除点）
             </a>
             <p
               v-if="mountQualitySummary"
@@ -2744,16 +2758,17 @@ onBeforeUnmount(() => {
               {{ mountQualitySummary.message }}
             </p>
             <div class="mount-result-metrics">
-              <div v-if="mountStage1Summary"><span>① 跨姿态 RMS</span><strong>{{ mountStage1Summary.rms }} mm</strong></div>
+              <div v-if="mountResultStage1Summary"><span>① 参与贴纸跨姿态 RMS</span><strong>{{ mountResultStage1Summary.rms }} mm</strong></div>
+              <div v-if="mountResultStage1Summary"><span>① 剔除离群后观测</span><strong>{{ mountResultStage1Summary.count }}</strong></div>
               <div v-if="mountStage2Summary"><span>② 逐贴纸 RMS</span><strong>{{ mountStage2Summary.rms }} mm</strong></div>
               <div><span>逐观测 RMS</span><strong>{{ mountResidualSummary.rms }} mm</strong></div>
               <div><span>中位误差</span><strong>{{ mountResidualSummary.median }} mm</strong></div>
               <div><span>最大误差</span><strong>{{ mountResidualSummary.max }} mm</strong></div>
               <div v-if="mountLooSummary">
-                <span>跨姿态 RMS</span><strong>{{ mountLooSummary.rms }} mm</strong>
+                <span>留一姿态验证 RMS</span><strong>{{ mountLooSummary.rms }} mm</strong>
               </div>
               <div v-if="mountLooSummary">
-                <span>跨姿态 P95</span><strong>{{ mountLooSummary.p95 }} mm</strong>
+                <span>留一姿态验证 P95</span><strong>{{ mountLooSummary.p95 }} mm</strong>
               </div>
               <div>
                 <span>退化指标</span><strong>{{ Number(mountResult.collinearity).toFixed(3) }}</strong>
@@ -2775,7 +2790,7 @@ onBeforeUnmount(() => {
               <code>{{ mountResult.calib_used }}</code>
             </div>
             <div v-if="mountPoseResidualRows.length" class="residual-ranking">
-              <span>各姿态拟合误差（从高到低）</span>
+              <span>参与观测的各姿态误差（从高到低）</span>
               <div
                 v-for="row in mountPoseResidualRows"
                 :key="row.poseId"
@@ -2787,7 +2802,7 @@ onBeforeUnmount(() => {
               </div>
             </div>
             <div v-if="mountPointResidualRows.length" class="worst-points">
-              <span>误差最大的模型点</span>
+              <span>参与解算中误差最大的模型点</span>
               <code
                 v-for="row in mountPointResidualRows"
                 :key="row.pointId"
@@ -2813,7 +2828,7 @@ onBeforeUnmount(() => {
               </div>
             </div>
             <div v-if="mountResult.warnings?.length" class="mount-result-warnings">
-              <span>警告</span>
+              <span>警告（包含全量一致性诊断）</span>
               <p v-for="warning in mountResult.warnings" :key="warning">{{ warning }}</p>
             </div>
             <details class="result-paths">

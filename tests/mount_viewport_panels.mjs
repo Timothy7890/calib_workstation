@@ -68,10 +68,21 @@ try {
       if (path === `/api/hands/${handId}/model`) return reply({ hand_id: handId, label: '强脑-Revo2-左', base_link: 'base_link', links: [] })
       if (path === '/api/mount/samples') return reply({ samples })
       if (path === '/api/mount/result') return reply({ result: {
-        residual_mm: { rms: 16.63, median: 11.62, max: 43.96 },
+        num_samples: 2, point_count: 1, pose_count: 3,
+        point_ids: ['back-green-01'], excluded_point_ids: ['palm-red-02', 'side-yellow-01'],
+        residual_mm: { rms: Math.sqrt(10), median: 3, max: 4 },
+        residual_by_point_mm: {
+          'back-green-01': { count: 2, rms: Math.sqrt(10), max: 4, per_observation: [2, 4] },
+          'palm-red-02': { count: 1, rms: 50, max: 50, per_observation: [50] },
+        },
+        residual_by_pose_mm: { excluded_only: { count: 1, rms: 50, max: 50 } },
         stage1: { points: ['back-green-01', 'palm-red-02', 'side-yellow-01'].map((point_id, i) => ({
           point_id, has_model_point: i !== 2, pose_count: 5, used_pose_count: 3,
           spread_mm: { rms: 2.65 },
+          per_pose: i === 0 ? [
+            { pose_id: 'episode_0000', deviation_mm: 1, outlier: false },
+            { pose_id: 'episode_0001', deviation_mm: 1, outlier: false },
+          ] : [{ pose_id: 'excluded_only', deviation_mm: 50, outlier: true }],
         })) },
         stage2: { points: [{ point_id: 'back-green-01', residual_mm: 22.28 }] },
       } })
@@ -127,6 +138,20 @@ try {
     await checkTable()
     assert.ok(await table.evaluate(el => el.scrollWidth > el.clientWidth))
     await table.evaluate(el => { el.style.width = '' })
+    const ranking = panel.locator('.residual-ranking')
+    assert.ok((await ranking.innerText()).includes('episode_0001'))
+    assert.ok(!(await ranking.innerText()).includes('excluded_only'))
+    assert.ok(!(await ranking.innerText()).includes('50.00'))
+    assert.ok((await panel.locator('.worst-points').innerText()).includes('绿1'))
+    assert.ok(!(await panel.locator('.worst-points').innerText()).includes('红2'))
+    assert.ok((await panel.innerText()).includes('2 个参与姿态'))
+    const boxes = table.locator('input[type=checkbox]')
+    assert.equal(await boxes.nth(0).isChecked(), true)
+    assert.equal(await boxes.nth(1).isChecked(), false, 'Saved exclusions must survive refresh')
+    await boxes.nth(1).check()
+    assert.ok((await panel.innerText()).includes('勾选已变化'))
+    assert.ok(!(await panel.locator('.worst-points').innerText()).includes('红2'), 'Draft changes must not alter saved result scope')
+    await boxes.nth(1).uncheck()
     await panel.evaluate(el => { el.scrollTop = el.scrollHeight })
     await page.getByRole('button', { name: '零位手模型', exact: true }).click()
     assert.ok((await panel.innerText()).includes('已选 1/20'), 'Switching views must retain model points')
