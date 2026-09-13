@@ -49,6 +49,14 @@ try {
       if (path === '/api/hands') return reply({ hands: [{ hand_id: handId, label: '强脑-Revo2-左', side: 'left' }] })
       if (path === `/api/hands/${handId}/model`) return reply({ hand_id: handId, label: '强脑-Revo2-左', base_link: 'base_link', links: [] })
       if (path === '/api/mount/samples') return reply({ samples })
+      if (path === '/api/mount/result') return reply({ result: {
+        residual_mm: { rms: 16.63, median: 11.62, max: 43.96 },
+        stage1: { points: ['back-green-01', 'palm-red-02', 'side-yellow-01'].map((point_id, i) => ({
+          point_id, has_model_point: i !== 2, pose_count: 5, used_pose_count: 3,
+          spread_mm: { rms: 2.65 },
+        })) },
+        stage2: { points: [{ point_id: 'back-green-01', residual_mm: 22.28 }] },
+      } })
       if (path.endsWith('point-cloud.ply')) return route.fulfill({ body: ply, headers: {
         'X-Point-Cloud-Id': 'mock-cloud', 'X-Point-Count': '3', 'X-Point-Cloud-Stride': '1',
       } })
@@ -74,6 +82,32 @@ try {
     assert.ok((await panel.innerText()).includes('写入已保存样本（1）'))
     assert.equal(await panel.locator('.mount-profile-card').count(), 0)
     assert.equal(await panel.locator('.mount-slot-clear').count(), 2)
+    const table = panel.locator('.stage-table')
+    await table.waitFor()
+    const checkTable = async () => {
+      const rows = await table.locator('.stage-row').evaluateAll(elements => elements.map(row => ({
+        height: row.getBoundingClientRect().height,
+        cells: [...row.children].map(cell => ({
+          text: cell.textContent.trim(), width: cell.clientWidth, contentWidth: cell.scrollWidth,
+          height: cell.getBoundingClientRect().height,
+        })),
+      })))
+      for (const row of rows) {
+        assert.ok(row.height <= 32, 'Rows must not grow from wrapped labels')
+        for (const cell of row.cells) {
+          assert.ok(cell.height <= 24, `Wrapped cell: ${cell.text}`)
+          assert.ok(cell.contentWidth <= cell.width + 1, `Overlapping cell: ${cell.text}`)
+        }
+      }
+      assert.equal(rows[0].cells[1].text, '贴纸')
+      assert.equal(rows[1].cells[1].text, '绿1')
+    }
+    await checkTable()
+    // A panel narrower than the columns must scroll, never stack sticker names.
+    await table.evaluate(el => { el.style.width = '240px' })
+    await checkTable()
+    assert.ok(await table.evaluate(el => el.scrollWidth > el.clientWidth))
+    await table.evaluate(el => { el.style.width = '' })
     await panel.evaluate(el => { el.scrollTop = el.scrollHeight })
     await page.getByRole('button', { name: '零位手模型', exact: true }).click()
     assert.ok((await panel.innerText()).includes('已选 1/20'), 'Switching views must retain model points')

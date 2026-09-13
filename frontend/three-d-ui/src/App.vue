@@ -2637,7 +2637,7 @@ onBeforeUnmount(() => {
                     @change="toggleMountExcluded(p.point_id)"
                   />
                 </span>
-                <span><i :style="{ background: p.slot.color }"></i>{{ p.slot.shortLabel }}</span>
+                <span class="stage-point-label"><i :style="{ background: p.slot.color }"></i>{{ p.slot.shortLabel }}</span>
                 <span>{{ p.used_pose_count ?? p.pose_count }}<template v-if="p.used_pose_count != null && p.used_pose_count !== p.pose_count">/{{ p.pose_count }}</template></span>
                 <span>{{ p.spread_mm ? Number(p.spread_mm.rms).toFixed(2) : '—' }}</span>
                 <span>

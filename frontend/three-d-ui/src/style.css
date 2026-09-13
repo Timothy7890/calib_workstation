@@ -1541,16 +1541,42 @@ button:disabled {
   display: grid;
   gap: 2px;
   font-size: 12px;
+  min-width: 0;
+  overflow-x: auto;
 }
 
 .stage-row {
   display: grid;
-  grid-template-columns: 42px 1fr 52px 74px 70px;
+  grid-template-columns: 34px 42px 42px minmax(76px, 1fr) minmax(64px, 1fr);
   align-items: center;
   gap: 4px;
   padding: 4px 6px;
   border-radius: 6px;
   color: #d5deeb;
+  min-width: 286px;
+  box-sizing: border-box;
+  min-height: 32px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.stage-row > span {
+  min-width: 0;
+}
+
+.stage-row > span:nth-child(n + 4) {
+  text-align: right;
+}
+
+.stage-row .stage-point-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.stage-point-label i {
+  flex: 0 0 7px;
+  margin-right: 0;
 }
 
 .stage-row.head {
