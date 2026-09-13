@@ -4,3 +4,4 @@ pyyaml
 numpy
 opencv-python>=4.8,<5
 pyorbbecsdk2
+pyzmq

@@ -4,7 +4,7 @@
   extrinsic        外参：T_cam2base（camera → torso_link），来自原生 2D handeye_result_left.json
   intrinsic        内参：Orbbec SDK 读出的 camera_intrinsics.json
   camera_transform 内部相机转换（RGB-D depth→color），2D 流程不产出
-  hand_mount      手安装：T_wrist2hand，来自 8132 mount_result.json
+  hand_mount      手安装：T_wrist2hand，来自原生 3D mount_result.json
   tcp_profile     TCP 点集：从 hand_mount 解算结果独立派生
 manifest.json 是机器人侧与云端的唯一契约；字段只加不改。
 """
@@ -270,7 +270,7 @@ class ArtifactStore:
         tcp_point_id: str | None = None,
         overwrite: bool = False,
     ) -> dict[str, dict[str, Any]]:
-        """Archive an 8132 mount solve as independent mount and TCP artifacts."""
+        """Archive a native 3D mount solve as independent mount and TCP artifacts."""
         if not result_path.is_file() or result_path.name != "mount_result.json":
             raise FileNotFoundError(f"安装标定结果不存在: {result_path}")
         if result.get("T_wrist2hand") is None:

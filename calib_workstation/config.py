@@ -107,7 +107,7 @@ def load_config(path: str | Path | None = None, *, mock: bool = False) -> Config
         vendor=str(robot.get("vendor") or "unitree"),
         model=str(robot.get("model") or "h2"),
         hand_eye_2d_url=str(services.get("hand_eye_2d") or "http://127.0.0.1:18005").rstrip("/"),
-        hand_eye_3d_url=str(services.get("hand_eye_3d") or "http://127.0.0.1:8132").rstrip("/"),
+        hand_eye_3d_url=str(services.get("hand_eye_3d") or "http://127.0.0.1:18005/three-d").rstrip("/"),
         hand_eye_3d_ui_url=str(services.get("hand_eye_3d_ui") or "http://127.0.0.1:7013").rstrip("/"),
         replay_url=str(services.get("replay") or "http://127.0.0.1:18004").rstrip("/"),
         capability_url=str(services.get("capability") or "http://127.0.0.1:18000").rstrip("/"),

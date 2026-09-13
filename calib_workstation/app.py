@@ -23,6 +23,9 @@ from .config import CAMERA_ROLES, UNIT_CODE_RE, Config, validate_unit_code
 from .manifest import ARTIFACT_TYPES, ArtifactStore
 from .calib2d import Calib2DEngine
 from .camera import CameraManager, MockSource, OrbbecSource, discover_orbbec
+from .calib3d import app as calib3d_app
+from .calib3d import mount_api as calib3d_mount
+from .calib3d.runtime import configure as configure_calib3d
 
 ARMS = ("left", "right")
 # 运行名：允许中文等 Unicode 字母/数字、. _ -；不能有空格、斜杠，不能以 . 开头（与 18004 一致）
@@ -195,7 +198,6 @@ def create_app(config: Config) -> FastAPI:
     app = FastAPI(title="标定工作站", version=__version__)
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-    he3d = HttpClient("hand_eye_3D(8132)", config.hand_eye_3d_url, timeout_s=120.0)
     replay = HttpClient("回放(18004)", config.replay_url)
     capability = HttpClient("能力中心(18000)", config.capability_url)
     ws = Workspace(config)
@@ -220,7 +222,16 @@ def create_app(config: Config) -> FastAPI:
     )
     app.state.camera_manager = camera_manager
     app.state.calib2d = calib2d
+    calib3d_camera = configure_calib3d(
+        camera_manager,
+        data_root=config.data_root,
+        rgbd_calibration_path=config.rgbd_calibration_path,
+        capability_url=config.capability_url,
+        mock=config.mock,
+    )
+    app.state.calib3d_camera = calib3d_camera
     app.router.add_event_handler("shutdown", camera_manager.close)
+    app.router.add_event_handler("shutdown", calib3d_app.pose_provider.close)
 
     def auto_push() -> None:
         """归档 / 切换生效后，若开启自动推送则后台把待同步产物推到云端。"""
@@ -336,7 +347,7 @@ def create_app(config: Config) -> FastAPI:
     def api_health():
         out: dict[str, Any] = {"ok": True, "services": {}}
         ok2d, err2d = True, None
-        ok3d, err3d = he3d.reachable("/api/status")
+        ok3d, err3d = True, None
         okr, errr = replay.reachable("/api/status")
         okc, errc = capability.reachable("/api/capability/registry")
         out["services"]["hand_eye_2d"] = {"ok": ok2d, "error": err2d}
@@ -401,7 +412,9 @@ def create_app(config: Config) -> FastAPI:
         serial = str(body.get("serial") or "").strip()
         try:
             role = native_camera_role(serial, body.get("camera_role"))
-            return {"success": True, "camera": calib2d.select(role, serial)}
+            camera = calib2d.select(role, serial)
+            calib3d_camera.select(role, serial)
+            return {"success": True, "camera": camera}
         except (KeyError, ValueError, RuntimeError) as exc:
             raise fail(409, str(exc)) from exc
 
@@ -470,15 +483,23 @@ def create_app(config: Config) -> FastAPI:
         manifest["path"] = str(store().artifact_dir(artifact_type, role, manifest["run_id"]))
         return manifest
 
+    def local_3d_payload(response: Any) -> dict[str, Any]:
+        if isinstance(response, JSONResponse):
+            payload = json.loads(response.body.decode("utf-8"))
+            if response.status_code >= 400:
+                raise fail(response.status_code, str(payload.get("error") or "3D请求失败"))
+            return payload
+        if not isinstance(response, dict):
+            raise fail(500, "3D引擎返回了无效响应")
+        return response
+
     @app.get("/api/hand-calibration")
-    def api_hand_calibration(request: Request):
+    async def api_hand_calibration(request: Request):
         registry = capability_registry()
         active = registry.get("active") or {}
         role = str(active.get("camera_role") or "head")
-        ok3d, error3d = he3d.reachable("/api/status")
-        mount = None
-        if ok3d:
-            mount = he3d.get("/api/mount/result")
+        ok3d, error3d = True, None
+        mount = local_3d_payload(await calib3d_mount.api_mount_result())
         current = {
             artifact_type: active_camera_manifest(artifact_type, role)
             for artifact_type in ("extrinsic", "intrinsic", "camera_transform")
@@ -491,11 +512,11 @@ def create_app(config: Config) -> FastAPI:
             "camera_role": role,
             "camera_artifacts": current,
             "mount": mount,
-            "ui_url": _public_url(config.hand_eye_3d_ui_url, request),
+            "ui_url": str(request.base_url).rstrip("/") + "/three-d/",
         }
 
     @app.post("/api/hand-calibration/solve")
-    def api_hand_calibration_solve(body: dict):
+    async def api_hand_calibration_solve(body: dict):
         registry = capability_registry()
         active = registry.get("active") or {}
         role = str(body.get("camera_role") or active.get("camera_role") or "head")
@@ -504,10 +525,12 @@ def create_app(config: Config) -> FastAPI:
         if extrinsic is None:
             raise fail(409, f"{role_label(role)}还没有生效的 2D 外参")
         calib_path = Path(extrinsic["path"]) / str(extrinsic.get("primary_file") or "handeye_result_left.json")
-        return he3d.post("/api/mount/solve", {"calib_path": str(calib_path)}, timeout_s=180.0)
+        return local_3d_payload(
+            await calib3d_mount.api_mount_solve({"calib_path": str(calib_path)})
+        )
 
     @app.post("/api/hand-calibration/finalize")
-    def api_hand_calibration_finalize(body: dict):
+    async def api_hand_calibration_finalize(body: dict):
         run_id = str(body.get("run_id") or "").strip()
         if not _RUN_NAME_RE.match(run_id):
             raise fail(422, "运行名不能为空，只能含 Unicode 字母/数字及 . _ -，且不能以 . 开头")
@@ -522,18 +545,18 @@ def create_app(config: Config) -> FastAPI:
         extrinsic = active_camera_manifest("extrinsic", role)
         if extrinsic is None:
             raise fail(409, f"{role_label(role)}还没有生效的 2D 外参")
-        mount_payload = he3d.get("/api/mount/result")
+        mount_payload = local_3d_payload(await calib3d_mount.api_mount_result())
         result = mount_payload.get("result")
         if not isinstance(result, dict):
-            raise fail(409, "8132 还没有安装标定结果，请先标注并解算")
+            raise fail(409, "3D引擎还没有安装标定结果，请先标注并解算")
         if mount_payload.get("stale"):
             raise fail(409, "安装标定结果已过期：样本在解算后发生变化，请重新解算")
         result_arm = str(result.get("arm") or "").replace("_arm", "")
         if result_arm and f"{result_arm}_arm" != arm:
-            raise fail(409, f"8132 结果属于 {result.get('arm')}，18000 当前激活的是 {arm}")
+            raise fail(409, f"3D结果属于 {result.get('arm')}，18000 当前激活的是 {arm}")
         result_hand = str(result.get("hand_id") or "")
         if result_hand and result_hand != hand_id:
-            raise fail(409, f"8132 结果属于手 {result_hand}，18000 当前激活的是 {hand_id}")
+            raise fail(409, f"3D结果属于手 {result_hand}，18000 当前激活的是 {hand_id}")
         result_path = Path(str(result.get("saved_to") or ""))
         hand = next((item for item in registry.get("hands") or []
                      if item.get("id") == hand_id), {})
@@ -1105,6 +1128,9 @@ def create_app(config: Config) -> FastAPI:
         except CloudError as exc:
             raise fail(502, str(exc)) from exc
         return {"ok": True, "pushed": pushed}
+
+    # 完整3D API和资源也由18005同一进程提供；该子应用不持有相机设备。
+    app.mount("/three-d", calib3d_app.app, name="calib3d")
 
     # ---------------- 前端 ----------------
 

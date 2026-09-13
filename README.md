@@ -7,7 +7,8 @@
 ```
 浏览器 ──► 18005 calib_workstation（本项目：向导页面 + 编排接口 + 产物归档）
               ├─► 原生 2D 引擎          相机枚举/选择、图像流、采集、求解（18005进程内）
-              ├─► 8132 + 7013 hand_eye_3D  点云标注、手安装解算（可选，由 --3d 启动并嵌入）
+              ├─► 原生 3D 引擎          RGB-D点选、手安装/TCP解算（18005进程内）
+              ├─► 7013 迁移期界面       点云标注操作台（暂嵌入，后续并入本项目前端）
               ├─► 18004 calibration_replay 轨迹回放：接管/协力拖动/归位/自动摆位（唯一 rt/arm_sdk 发布者）
               └─► 18000 能力中心          启动前拜访
 ```
@@ -20,11 +21,11 @@ cd /home/robot/yx/project/calib/calib_workstation
 ./start.sh --arm left      # 初始选择左臂（向导里会按计划自动切换）
 ./start.sh --mock          # 无硬件联调：18005 mock 相机（带可检出的棋盘格），18004 --mock 但采集仍走 HTTP
 ./start.sh --dev           # 前端 Vite 开发服务器 5175
-./start.sh --3d            # 同时启动 8132 与 7013，在“3D 手/TCP”页完成标注、解算和发布
+./start.sh --3d            # 兼容旧命令；3D 已默认内置，不再启动 8132
 ```
 
 脚本顺序：找 Python → 读 `config/workstation.yaml` → 检查端口 → 18000 可达（否则拉起 `IK_replay/capability.sh`）
-→ `scripts/camera_lock.sh acquire` 释放相机 → 18004（`replay.sh start`）→ 前端构建（缺失时）→ 18005（含原生2D引擎）。
+→ `scripts/camera_lock.sh acquire` 释放相机 → 18004（`replay.sh start`）→ 前端构建（缺失时）→ 18005（含原生2D/3D引擎）。
 退出时逆序停止，并只在“推流原本在跑”时才 `systemctl start` 恢复。
 
 工作站的目标相机架构是单一所有者：一个物理序列号只允许一个 SDK Pipeline，
@@ -53,7 +54,7 @@ sudo visudo -c
 | 键 | 说明 |
 |---|---|
 | 机器人编号 | **不在配置文件里**。首次打开页面时输入（右上角可切换），保存在 `<data_root>/workstation_state.json`；是产物目录第一层 |
-| `services.*` | 18005 原生 2D / 8132 / 7013 / 18004 / 18000 地址 |
+| `services.*` | 18005 原生 2D/3D、迁移期 7013、18004、18000 地址 |
 | `data_root` | 产物根目录 → `<data_root>/<unit_code>/calibrations/…`；2D 兜底会话目录在 `<data_root>/_hand_eye_2d_sessions/`（正式采集落回放运行目录） |
 | `cameras.head|waist` | 标签、回放计划目标（`hand_eye_2D_head|waist`）、可选序列号（留空则向导里从枚举结果选） |
 | `board` | 棋盘格内角点 `11x8`、默认方格边长 |
@@ -74,8 +75,8 @@ sudo visudo -c
 
 ## 3D 手安装 / TCP 流程（页面「3D 手/TCP」）
 
-先在 18000 选择当前臂、实体手和相机位置，并让该位置的 2D 外参处于生效状态。使用 `./start.sh --3d` 后，
-在嵌入的 7013 操作台采集、标注样本；18005 把当前 2D 外参传给 8132 解算。确认叠加效果后点击“归档并发布”，
+先在 18000 选择当前臂、实体手和相机位置，并让该位置的 2D 外参处于生效状态。
+在嵌入的点云操作台采集、标注样本；18005 原生 3D 引擎直接使用当前 2D 外参解算。确认叠加效果后点击“归档并发布”，
 工作站将组合文件拆成 `hand_mount` 与 `tcp_profile` 两类独立产物，和当前相机产物一起登记到 18000，并保存
 `arm + hand_id + camera_role` 的生效绑定。配置了云端自动推送时，同步在同一步执行；失败不会撤销本地归档，
 可在“标定记录”页重试。
